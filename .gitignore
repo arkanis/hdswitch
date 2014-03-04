@@ -2,3 +2,6 @@
 *.sublime-*
 
 hdswitch
+experiments/v4l2_cam
+experiments/alsa
+experiments/alsa_rec

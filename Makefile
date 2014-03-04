@@ -11,14 +11,15 @@ CFLAGS := $(CFLAGS) -g
 hdswitch: LDLIBS = deps/libSDL2.a -ldl -lrt -lm `pkg-config --libs gl`
 hdswitch: deps/libSDL2.a hdswitch.o drawable.o stb_image.o cam.o
 
-test: CFLAGS := $(CFLAGS) -Wno-multichar
-test: cam.o
-
 hdswitch.o: deps/libSDL2.a
 hdswitch.o: CFLAGS := $(CFLAGS) -Ideps/include `pkg-config --cflags gl` -Wno-multichar
 
-alsa: LDLIBS = -lasound
-alsar: LDLIBS = -lasound
+
+experiments/v4l2_cam: CFLAGS := $(CFLAGS) -Wno-multichar
+experiments/v4l2_cam: cam.o
+
+experiments/alsa: LDLIBS = -lasound
+experiments/alsa_rec: LDLIBS = -lasound
 
 
 #
@@ -46,7 +47,7 @@ deps/libSDL2.a: deps/libSDL2.tar.gz
 	rm -rf deps/SDL2
 
 
-# Clean all files listed in .gitignore. Ensures this file
-# is properly maintained.
+# Clean all files listed in .gitignore, except sublime project files. Ensures the
+# ignore list is properly maintained.
 clean:
-	rm -fr `tr '\n' ' ' < .gitignore`
+	rm -fr `grep -v sublime .gitignore | tr '\n' ' '`
