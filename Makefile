@@ -8,12 +8,11 @@ CFLAGS := $(CFLAGS) -g
 #
 # Real applications, object files are created by implicit rules
 #
-hdswitch: LDLIBS = deps/libSDL2.a -ldl -lrt -lm `pkg-config --libs gl`
-hdswitch: deps/libSDL2.a hdswitch.o drawable.o stb_image.o cam.o
+hdswitch: LDLIBS = deps/libSDL2.a -ldl -lrt -lm `pkg-config --libs gl` -lasound
+hdswitch: deps/libSDL2.a hdswitch.o drawable.o stb_image.o cam.o sound.o
 
 hdswitch.o: deps/libSDL2.a
-hdswitch.o: CFLAGS := $(CFLAGS) -Ideps/include `pkg-config --cflags gl` -Wno-multichar
-
+hdswitch.o: CFLAGS := $(CFLAGS) -Ideps/include `pkg-config --cflags gl` -Wno-multichar -Wno-unused-but-set-variable -Wno-unused-variable
 
 experiments/v4l2_cam: CFLAGS := $(CFLAGS) -Wno-multichar
 experiments/v4l2_cam: cam.o
