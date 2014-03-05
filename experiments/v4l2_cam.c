@@ -9,9 +9,13 @@ int main(int argc, char** argv) {
 	
 	cam_p cam = cam_open(argv[1]);
 	cam_print_info(cam);
-	cam_setup(cam, __builtin_bswap32('YUYV'), 640, 480, 1, 30, NULL);
+	cam_print_frame_rate(cam);
+	cam_setup(cam, __builtin_bswap32('YUYV'), 640, 480, 30, 1, NULL);
+	cam_print_frame_rate(cam);
 	
-	cam_stream_start(cam, 2);
+	if ( ! cam_stream_start(cam, 4) )
+		return 1;
+	
 	for(size_t i = 0; i < 100; i++) {
 		cam_buffer_t frame = cam_frame_get(cam);
 		printf("%zu bytes: %p\n", frame.size, frame.ptr);

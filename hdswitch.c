@@ -15,12 +15,14 @@
 
 
 int main(int argc, char** argv) {
-	if (argc != 3) {
-		fprintf(stderr, "usage: %s v4l2-file alsa-input\n", argv[0]);
+	if (argc != 4) {
+		fprintf(stderr, "usage: %s v4l2-file1 v4l2-file2 alsa-input\n", argv[0]);
 		return 1;
 	}
 	
-	int w = 800, h = 448;
+	//int w = 800, h = 448;
+	int w = 640, h = 480;
+	int w2 = 640, h2 = 480;
 	
 	SDL_Init(SDL_INIT_VIDEO);
 	atexit(SDL_Quit);
@@ -48,12 +50,26 @@ int main(int argc, char** argv) {
 			 1.0,  1.0,     w, 0
 		};
 		video->vertex_buffer = buffer_new(sizeof(tri_strip), tri_strip);
+		
+		drawable_p video2 = drawable_new(GL_TRIANGLE_STRIP, "shaders/video.vs", "shaders/video.fs");
+		
+		video2->texture = texture_new(w2, h2, GL_RG8);
+		//texture_update(video->texture, GL_RGB, image_ptr);
+		
+		// Triangle strip for a basic quad. Quads were removed in OpenGL 3.2.
+		float tri_strip2[] = {
+			0.25, -1.0,        0, h2,
+			0.25, -0.4375,     0,  0,
+			 1.0, -1.0,       w2, h2,
+			 1.0, -0.4375,    w2,  0
+		};
+		video2->vertex_buffer = buffer_new(sizeof(tri_strip2), tri_strip2);
 	//free(image_ptr);
 	
 	// Setup sound input and output
 	size_t latency = 5;
 	
-	sound_p in = sound_open(argv[2], SOUND_CAPTURE, SOUND_NONBLOCK);
+	sound_p in = sound_open(argv[3], SOUND_CAPTURE, SOUND_NONBLOCK);
 	sound_configure(in, 48000, 2, SOUND_FORMAT_S16, true, latency);
 	
 	sound_p out = sound_open("default", SOUND_PLAYBACK, SOUND_NONBLOCK);
@@ -66,11 +82,18 @@ int main(int argc, char** argv) {
 	// Setup camera
 	cam_p cam = cam_open(argv[1]);
 	cam_print_info(cam);
-	cam_setup(cam, __builtin_bswap32('YUYV'), w, h, 1, 30, NULL);
+	cam_setup(cam, __builtin_bswap32('YUYV'), w, h, 30, 1, NULL);
+	cam_print_frame_rate(cam);
+	
+	cam_p cam2 = cam_open(argv[2]);
+	cam_print_info(cam2);
+	cam_setup(cam2, __builtin_bswap32('YUYV'), w2, h2, 30, 1, NULL);
+	cam_print_frame_rate(cam);
+	
 	cam_stream_start(cam, 2);
+	cam_stream_start(cam2, 2);
 	
-	
-	size_t poll_fd_count = 1 + sound_poll_fds_count(in) + sound_poll_fds_count(out);
+	size_t poll_fd_count = 2 + sound_poll_fds_count(in) + sound_poll_fds_count(out);
 	struct pollfd pollfds[poll_fd_count];
 	
 	timeval_t mark;
@@ -97,6 +120,8 @@ int main(int argc, char** argv) {
 			size_t poll_fds_used = 0;
 			
 			pollfds[0] = (struct pollfd){ .fd = cam->fd, .events = POLLIN, .revents = 0 };
+			poll_fds_used++;
+			pollfds[1] = (struct pollfd){ .fd = cam2->fd, .events = POLLIN, .revents = 0 };
 			poll_fds_used++;
 			
 			struct pollfd* in_poll_fds = pollfds + poll_fds_used;
@@ -160,23 +185,46 @@ int main(int argc, char** argv) {
 			flushes++;
 		}
 		
+		bool something_to_render = false;
+		
 		// Render new video frames
 		if (pollfds[0].revents & POLLIN) {
 			mark = time_now();
 			
 			cam_buffer_t frame = cam_frame_get(cam);
-			cam_time = time_mark(&mark);
+			cam_time += time_mark(&mark);
 			
 			texture_update(video->texture, GL_RG, frame.ptr);
-			tex_update_time = time_mark(&mark);
+			tex_update_time += time_mark(&mark);
+			
+			cam_frame_release(cam);
+			
+			something_to_render = true;
+		}
+		
+		if (pollfds[1].revents & POLLIN) {
+			mark = time_now();
+			
+			cam_buffer_t frame = cam_frame_get(cam2);
+			cam_time += time_mark(&mark);
+			
+			texture_update(video2->texture, GL_RG, frame.ptr);
+			tex_update_time += time_mark(&mark);
+			
+			cam_frame_release(cam2);
+			
+			something_to_render = true;
+		}
+		
+		if (something_to_render) {
+			mark = time_now();
 			
 			drawable_draw(video);
+			drawable_draw(video2);
 			draw_time = time_mark(&mark);
 			
 			SDL_GL_SwapWindow(win);
 			swap_time = time_mark(&mark);
-			
-			cam_frame_release(cam);
 		}
 		
 		// Output stats
@@ -201,6 +249,8 @@ int main(int argc, char** argv) {
 	
 	cam_stream_stop(cam);
 	cam_close(cam);
+	cam_stream_stop(cam2);
+	cam_close(cam2);
 	
 	drawable_destroy(video);
 	

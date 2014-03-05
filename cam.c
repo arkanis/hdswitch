@@ -325,6 +325,41 @@ static void show_controls(int fd){
 	}
 }
 
+bool cam_print_frame_rate(cam_p cam) {
+	struct v4l2_streamparm params = {0};
+	
+	params.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+	if ( ioctl(cam->fd, VIDIOC_G_PARM, &params) == -1 ) {
+		perror("VIDIOC_G_PARM ioctl() failed");
+		return false;
+	}
+	
+	if ( !(params.parm.capture.capability & V4L2_CAP_TIMEPERFRAME) ) {
+		fprintf(stderr, "frame rate setting not supported\n");
+		return false;
+	}
+	
+	printf("cam set to %u/%u fps, %u read buffers\n",
+		params.parm.capture.timeperframe.denominator, params.parm.capture.timeperframe.numerator,
+		params.parm.capture.readbuffers);
+	
+	struct v4l2_format format;
+	memset(&format, 0, sizeof(format));
+	
+	// Get the current pixel format (best practice mentioned in the V4L2 spec)
+	format.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+	if ( ioctl(cam->fd, VIDIOC_G_FMT, &format) == -1 ) {
+		perror("VIDIOC_G_FMT ioctl() failed");
+		return false;
+	}
+	
+	printf("  %ux%u, format %.4s, %u bytes per line, %u image size\n",
+		format.fmt.pix.width, format.fmt.pix.height, (char*)&format.fmt.pix.pixelformat,
+		format.fmt.pix.bytesperline, format.fmt.pix.sizeimage);
+	
+	return true;
+}
+
 
 static bool set_pixel_format_and_resolution(cam_p cam, uint32_t pixel_format, uint32_t width, uint32_t height){
 	struct v4l2_format format;
@@ -371,6 +406,11 @@ static bool set_frame_rate(cam_p cam, uint32_t frame_rate_num, uint32_t frame_ra
 	
 	if ( ioctl(cam->fd, VIDIOC_S_PARM, &params) == -1 ) {
 		perror("VIDIOC_S_PARM ioctl() failed");
+		return false;
+	}
+	
+	if ( ioctl(cam->fd, VIDIOC_G_PARM, &params) == -1 ) {
+		perror("VIDIOC_G_PARM ioctl() failed");
 		return false;
 	}
 	
