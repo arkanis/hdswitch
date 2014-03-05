@@ -20,6 +20,10 @@ experiments/v4l2_cam: cam.o
 experiments/alsa: LDLIBS = -lasound
 experiments/alsa_rec: LDLIBS = -lasound
 
+experiments/fbo: CFLAGS := $(CFLAGS) -Ideps/include `pkg-config --cflags gl`
+experiments/fbo: LDLIBS = deps/libSDL2.a -ldl -lrt -lm `pkg-config --libs gl`
+experiments/fbo: deps/libSDL2.a drawable.o stb_image.o
+
 
 #
 # Special parameters for some objects files not really under our control
