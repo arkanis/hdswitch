@@ -7,6 +7,8 @@
 
 #include "../drawable.h"
 #include "../stb_image.h"
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#include "stb_image_write.h"
 
 
 int main(int argc, char** argv) {
@@ -34,20 +36,20 @@ int main(int argc, char** argv) {
 		
 		// Triangle strip for a basic quad. Quads were removed in OpenGL 3.2.
 		float tri_strip[] = {
-			-1.0, -1.0,     0, h,
-			-1.0,  1.0,     0, 0,
-			 1.0, -1.0,     w, h,
-			 1.0,  1.0,     w, 0
+			-1.0, -1.0,     0, 0,
+			-1.0,  1.0,     0, h,
+			 1.0, -1.0,     w, 0,
+			 1.0,  1.0,     w, h
 		};
 		video->vertex_buffer = buffer_new(sizeof(tri_strip), tri_strip);
 	free(image_ptr);
 	
 	drawable_p gui = drawable_new(GL_TRIANGLE_STRIP, "fbo.vs", "fbo.fs");
 	float tri_strip2[] = {
-		-1.0, -1.0,     0, 0,
-		-1.0,  1.0,     0, h,
-		 1.0, -1.0,     w, 0,
-		 1.0,  1.0,     w, h
+		-1.0, -1.0,     0, h,
+		-1.0,  1.0,     0, 0,
+		 1.0, -1.0,     w, h,
+		 1.0,  1.0,     w, 0
 	};
 	gui->vertex_buffer = buffer_new(sizeof(tri_strip2), tri_strip2);
 	
@@ -86,9 +88,21 @@ int main(int argc, char** argv) {
 		}
 		
 		glBindFramebuffer(GL_DRAW_FRAMEBUFFER, fb);
-		glViewport(0, 0, w, h);
-		drawable_draw(video);
+			glViewport(0, 0, w, h);
+			drawable_draw(video);
 		glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+		
+		if (event.type == SDL_KEYDOWN && event.key.keysym.sym == SDLK_s) {
+			glBindFramebuffer(GL_READ_FRAMEBUFFER, fb);
+				size_t image_size = w * h * 3;
+				void*  image_ptr  = malloc(image_size);
+				
+				glReadPixels(0, 0, w, h, GL_RGB, GL_UNSIGNED_BYTE, image_ptr);
+				stbi_write_png("test.png", w, h, 3, image_ptr, 0);
+				
+				free(image_ptr);
+			glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+		}
 		
 		glViewport(0, 0, win_w, win_h);
 		glClearColor(0, 0, 0, 1);
