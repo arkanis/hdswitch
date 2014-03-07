@@ -396,10 +396,9 @@ fbo_p fbo_new(GLuint target_texture) {
 	glBindTexture(GL_TEXTURE_RECTANGLE, target_texture);
 		glGetTexLevelParameteriv(GL_TEXTURE_RECTANGLE, 0, GL_TEXTURE_WIDTH, &fbo->width);
 		glGetTexLevelParameteriv(GL_TEXTURE_RECTANGLE, 0, GL_TEXTURE_HEIGHT, &fbo->height);
-		
-		glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_RECTANGLE, target_texture, 0);
 	glBindTexture(GL_TEXTURE_RECTANGLE, 0);
 	
+	glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_RECTANGLE, target_texture, 0);
 	GLenum error = glCheckFramebufferStatus(GL_DRAW_FRAMEBUFFER);
 	if (error != GL_FRAMEBUFFER_COMPLETE) {
 		fprintf(stderr, "Framebuffer setup failed, error: %4X\n", error);
