@@ -9,7 +9,7 @@ CFLAGS := $(CFLAGS) -g
 # Real applications, object files are created by implicit rules
 #
 hdswitch: LDLIBS = deps/libSDL2.a -ldl -lrt -lm `pkg-config --libs gl` -lasound
-hdswitch: deps/libSDL2.a hdswitch.o drawable.o stb_image.o cam.o sound.o
+hdswitch: deps/libSDL2.a hdswitch.o drawable.o stb_image.o cam.o sound.o ebml_writer.o array.o
 
 hdswitch.o: deps/libSDL2.a
 hdswitch.o: CFLAGS := $(CFLAGS) -Ideps/include `pkg-config --cflags gl` -Wno-multichar -Wno-unused-but-set-variable -Wno-unused-variable
@@ -29,7 +29,9 @@ experiments/fbo: deps/libSDL2.a drawable.o stb_image.o
 # Special parameters for some objects files not really under our control
 #
 stb_image.o: CFLAGS := $(CFLAGS) -Wno-sign-compare -Wno-unused-but-set-variable
-
+# Need GNU99 since C99 removes ftello() from stdin.h. Found no other way
+# to make it work yet.
+ebml_writer.o: CFLAGS := $(CFLAGS) -std=gnu99
 
 #
 # Download and build SDL2 as static library.
