@@ -281,6 +281,7 @@ static void show_controls(int fd){
 		"bitmask",
 		"integer_menu"
 	};
+	/*
 	struct v4l2_queryctrl control = {0};
 	
 	printf("Controls:\n");
@@ -323,6 +324,51 @@ static void show_controls(int fd){
 				control.name, control_value.value, type_names[control.type], control.minimum, control.maximum, control.step);
 		}
 	}
+	*/
+	
+	printf("Extended controls:\n");
+	struct v4l2_queryctrl control = {0};
+	
+	control.id = V4L2_CTRL_FLAG_NEXT_CTRL;
+	while ( ioctl (fd, VIDIOC_QUERYCTRL, &control) == 0) {
+		
+		if (control.flags & V4L2_CTRL_FLAG_DISABLED) {
+			printf("- DISABLED: ");
+		} else {
+			printf("- ");
+		}
+		
+		struct v4l2_control control_value = {control.id, 0};
+		if ( ioctl(fd, VIDIOC_G_CTRL, &control_value) == -1 )
+			perror("VIDIOC_G_CTRL ioctl() failed");
+		
+		if (control.type == V4L2_CTRL_TYPE_MENU || control.type == V4L2_CTRL_TYPE_INTEGER_MENU) {
+			printf("%s: %d (%s)\n", control.name, control_value.value, type_names[control.type]);
+			
+			struct v4l2_querymenu menu_entry = {0};
+			for(ssize_t i = control.minimum; i <= control.maximum; i++){
+				menu_entry.id = control.id;
+				menu_entry.index = i;
+				
+				if ( ioctl(fd, VIDIOC_QUERYMENU, &menu_entry) == -1 ) {
+					perror("VIDIOC_QUERYMENU ioctl() failed");
+					continue;
+				}
+				
+				if (control.type == V4L2_CTRL_TYPE_MENU)
+					printf("  %d: %s\n", menu_entry.index, menu_entry.name);
+				else
+					printf("  %d: %lld\n", menu_entry.index, menu_entry.value);
+			}
+			
+		} else {
+			printf("%s: %d (%s, values in [%d, %d] step %d)\n",
+				control.name, control_value.value, type_names[control.type], control.minimum, control.maximum, control.step);
+		}
+		
+		control.id |= V4L2_CTRL_FLAG_NEXT_CTRL;
+	}
+
 }
 
 bool cam_print_frame_rate(cam_p cam) {
