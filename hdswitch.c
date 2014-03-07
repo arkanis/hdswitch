@@ -307,18 +307,21 @@ int main(int argc, char** argv) {
 	
 	GLuint video1_tex = texture_new(v1w, v1h, GL_RG8);
 	GLuint video2_tex = texture_new(v2w, v2h, GL_RG8);
-	GLuint composite_video_tex  = texture_new(cw, ch, GL_RG8);
-	size_t composite_video_size = cw * ch * 2;
-	void*  composite_video_ptr  = malloc(composite_video_size);
-
+	GLuint composite_video_tex  = texture_new(cw, ch, GL_RGB8);
+	GLuint stream_video_tex     = texture_new(cw, ch, GL_RG8);
+	size_t stream_video_size = cw * ch * 2;
+	void*  stream_video_ptr  = malloc(stream_video_size);
+	
+	GLuint main_tex = video1_tex, small_tex = video2_tex;
+	
 	
 	// Initialize the textures so we don't get random GPU RAM garbage in
 	// our first composite frame when one webcam frame hasn't been uploaded yet
 	GLuint clear_fbo = 0;
 	glGenFramebuffers(1, &clear_fbo);
 	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, clear_fbo);
-		
-		glClearColor(0, 0, 0, 0);
+		// Black in YCbCr
+		glClearColor(0, 0.5, 0, 0);
 		
 		glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_RECTANGLE, video1_tex, 0);
 		if (glCheckFramebufferStatus(GL_DRAW_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
@@ -375,6 +378,19 @@ int main(int argc, char** argv) {
 		gui->vertex_buffer = buffer_new(sizeof(tri_strip), tri_strip);
 	}
 	
+	fbo_p stream_fbo = fbo_new(stream_video_tex);
+	drawable_p stream = drawable_new(GL_TRIANGLE_STRIP, "shaders/composite_on_stream.vs", "shaders/composite_on_stream.fs");
+	stream->texture = composite_video_tex;
+	{
+		float tri_strip[] = {
+			-1.0, -1.0,      0,  0,
+			-1.0,  1.0,      0, ch,
+			 1.0, -1.0,     cw,  0,
+			 1.0,  1.0,     cw, ch
+		};
+		stream->vertex_buffer = buffer_new(sizeof(tri_strip), tri_strip);
+	}
+	
 	
 	/*
 	video->texture = texture_new(w, h, GL_RG8);
@@ -421,7 +437,7 @@ int main(int argc, char** argv) {
 	cam_p cam2 = cam_open(argv[2]);
 	cam_print_info(cam2);
 	cam_setup(cam2, __builtin_bswap32('YUYV'), v2w, v2h, 30, 1, NULL);
-	cam_print_frame_rate(cam);
+	cam_print_frame_rate(cam2);
 	
 	
 	server_start(cw, ch);
@@ -452,6 +468,12 @@ int main(int argc, char** argv) {
 				if (event.type == SDL_WINDOWEVENT && event.window.event == SDL_WINDOWEVENT_RESIZED) {
 					ww = event.window.data1;
 					wh = event.window.data2;
+				}
+				
+				if (event.type == SDL_KEYDOWN && event.key.keysym.sym == SDLK_s) {
+					main_tex ^= small_tex;
+					small_tex ^= main_tex;
+					main_tex ^= small_tex;
 				}
 			}
 		double sdl_time = time_mark(&mark);
@@ -568,17 +590,22 @@ int main(int argc, char** argv) {
 				glClearColor(0, 0.5, 0, 0);
 				glClear(GL_COLOR_BUFFER_BIT);
 				
-				video_on_composite->texture = video1_tex;
+				video_on_composite->texture = main_tex;
 				video_on_composite->vertex_buffer = video1_vertex_buffer;
 				drawable_draw(video_on_composite);
 				
-				video_on_composite->texture = video2_tex;
+				video_on_composite->texture = small_tex;
 				video_on_composite->vertex_buffer = video2_vertex_buffer;
 				drawable_draw(video_on_composite);
+				
+			fbo_bind(stream_fbo);
+				
+				drawable_draw(stream);
+				
 			fbo_bind(NULL);
 			
-			fbo_read(composite_video, GL_RG, GL_UNSIGNED_BYTE, composite_video_ptr);
-			server_write_frame(1, SDL_GetTicks() - start_ms, composite_video_ptr, composite_video_size);
+			fbo_read(stream_fbo, GL_RG, GL_UNSIGNED_BYTE, stream_video_ptr);
+			server_write_frame(1, SDL_GetTicks() - start_ms, stream_video_ptr, stream_video_size);
 			
 			glViewport(0, 0, ww, wh);
 			
@@ -621,14 +648,16 @@ int main(int argc, char** argv) {
 	
 	server_close();
 	
+	drawable_destroy(stream);
 	drawable_destroy(gui);
 	drawable_destroy(video_on_composite);
 	
+	fbo_destroy(stream_fbo);
 	fbo_destroy(composite_video);
 	texture_destroy(video1_tex);
 	texture_destroy(video2_tex);
 	texture_destroy(composite_video_tex);
-	free(composite_video_ptr);
+	free(stream_video_ptr);
 	
 	SDL_GL_DeleteContext(gl_ctx);
 	SDL_DestroyWindow(win);

@@ -16,8 +16,6 @@ uniform sampler2DRect tex;
 varying vec2 tex_coords;
 
 void main(){
-	gl_FragColor = texture2DRect(tex, tex_coords);
-	/*
 	// Just show the luma channel
 	//gl_FragColor = vec4( texture2DRect(tex, tex_coords).rrr, 1 );
 	
@@ -35,7 +33,4 @@ void main(){
 		y + 1.772    * (cb - 0.5),
 		1
 	);
-	//gl_FragColor *= 0.0000001;
-	//gl_FragColor += vec4(x_mod_2, x_mod_2, x_mod_2, 2) / 2;
-	*/
 }
