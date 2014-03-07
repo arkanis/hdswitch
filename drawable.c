@@ -27,6 +27,7 @@ bool check_required_gl_extentions(){
 		// Both extentions are required for texture format and handling
 		"GL_ARB_texture_rectangle",
 		"GL_ARB_texture_storage",
+		"GL_ARB_framebuffer_object",
 		NULL
 	};
 	
@@ -376,4 +377,61 @@ static bool gl_ext_present(const char *ext_name){
 			return true;
 	}
 	return false;
+}
+
+
+
+//
+// Frame buffer object functions
+//
+
+fbo_p fbo_new(GLuint target_texture) {
+	fbo_p fbo = malloc(sizeof(fbo_t));
+	if (fbo == NULL)
+		return fbo;
+	
+	glGenFramebuffers(1, &fbo->fbo);
+	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, fbo->fbo);
+	
+	glBindTexture(GL_TEXTURE_RECTANGLE, target_texture);
+		glGetTexLevelParameteriv(GL_TEXTURE_RECTANGLE, 0, GL_TEXTURE_WIDTH, &fbo->width);
+		glGetTexLevelParameteriv(GL_TEXTURE_RECTANGLE, 0, GL_TEXTURE_HEIGHT, &fbo->height);
+		
+		glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_RECTANGLE, target_texture, 0);
+	glBindTexture(GL_TEXTURE_RECTANGLE, 0);
+	
+	GLenum error = glCheckFramebufferStatus(GL_DRAW_FRAMEBUFFER);
+	if (error != GL_FRAMEBUFFER_COMPLETE) {
+		fprintf(stderr, "Framebuffer setup failed, error: %4X\n", error);
+		
+		glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+		glDeleteFramebuffers(1, &fbo->fbo);
+		
+		free(fbo);
+		return NULL;
+	}
+	
+	
+	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+	return fbo;
+}
+
+void fbo_destroy(fbo_p fbo) {
+	glDeleteFramebuffers(1, &fbo->fbo);
+	free(fbo);
+}
+
+void fbo_bind(fbo_p fbo) {
+	if (fbo != NULL) {
+		glBindFramebuffer(GL_DRAW_FRAMEBUFFER, fbo->fbo);
+		glViewport(0, 0, fbo->width, fbo->height);
+	} else {
+		glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+	}
+}
+
+void fbo_read(fbo_p fbo, GLenum format, GLenum type, void* data) {
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo->fbo);
+	glReadPixels(0, 0, fbo->width, fbo->height, format, type, data);
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
 }

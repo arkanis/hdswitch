@@ -11,6 +11,7 @@
 #include "stb_image_write.h"
 
 
+
 int main(int argc, char** argv) {
 	if (argc != 2) {
 		fprintf(stderr, "usage: %s image\n", argv[0]);
@@ -53,6 +54,8 @@ int main(int argc, char** argv) {
 	};
 	gui->vertex_buffer = buffer_new(sizeof(tri_strip2), tri_strip2);
 	
+	
+	/*
 	GLuint fbo_tex = 0;
 	glGenTextures(1, &fbo_tex);
 	glBindTexture(GL_TEXTURE_RECTANGLE, fbo_tex);
@@ -69,6 +72,11 @@ int main(int argc, char** argv) {
 	
 	if ( glCheckFramebufferStatus(GL_DRAW_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE )
 		return fprintf(stderr, "framebuffer setup failed\n"), 1;
+	*/
+	
+	gui->texture = texture_new(w, h, GL_RGB8);
+	fbo_p fbo = fbo_new(gui->texture);
+	
 	
 	SDL_Event event;
 	int win_w = w, win_h = h;
@@ -87,21 +95,35 @@ int main(int argc, char** argv) {
 			win_h = h;
 		}
 		
+		/*
 		glBindFramebuffer(GL_DRAW_FRAMEBUFFER, fb);
 			glViewport(0, 0, w, h);
 			drawable_draw(video);
 		glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+		*/
+		fbo_bind(fbo);
+			drawable_draw(video);
+		fbo_bind(NULL);
 		
 		if (event.type == SDL_KEYDOWN && event.key.keysym.sym == SDLK_s) {
-			glBindFramebuffer(GL_READ_FRAMEBUFFER, fb);
-				size_t image_size = w * h * 3;
+			size_t image_size = fbo->width * fbo->height * 3;
+			void*  image_ptr  = malloc(image_size);
+			
+			fbo_read(fbo, GL_RGB, GL_UNSIGNED_BYTE, image_ptr);
+			stbi_write_png("test.png", fbo->width, fbo->height, 3, image_ptr, 0);
+			
+			free(image_ptr);
+			/*
+			glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo->fbo);
+				size_t image_size = fbo->width * fbo->height * 3;
 				void*  image_ptr  = malloc(image_size);
 				
-				glReadPixels(0, 0, w, h, GL_RGB, GL_UNSIGNED_BYTE, image_ptr);
-				stbi_write_png("test.png", w, h, 3, image_ptr, 0);
+				glReadPixels(0, 0, fbo->width, fbo->height, GL_RGB, GL_UNSIGNED_BYTE, image_ptr);
+				stbi_write_png("test.png", fbo->width, fbo->height, 3, image_ptr, 0);
 				
 				free(image_ptr);
 			glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+			*/
 		}
 		
 		glViewport(0, 0, win_w, win_h);
@@ -111,9 +133,12 @@ int main(int argc, char** argv) {
 		SDL_GL_SwapWindow(win);
 	}
 	
+	/*
 	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
 	glDeleteFramebuffers(1, &fb);
 	glDeleteTextures(1, &fbo_tex);
+	*/
+	fbo_destroy(fbo);
 	
 	drawable_destroy(video);
 	drawable_destroy(gui);
