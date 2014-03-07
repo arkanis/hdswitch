@@ -284,14 +284,20 @@ int main(int argc, char** argv) {
 		return 1;
 	}
 	
-	//int w = 800, h = 448;
-	int w = 640, h = 480;
-	int w2 = 640, h2 = 480;
+	//int v1w = 640, v1h = 480;  // video1 raw dimensions, best for HP Webcam HD 5210: 800x448
+	int v1w = 800, v1h = 448;  // video1 raw dimensions, best for HP Webcam HD 5210: 
+	int v2w = 640, v2h = 480;  // video2 raw dimensions
+	int cw  = v1w, ch  = v1h;  // composite video dimensions
+	int ww  = cw,  wh  = ch;   // window dimensions
+	int cv1w = v1w,     cv1h = v1h,     cv1x = 0,         cv1y = 0;          // dimension and position of video1 in composite video
+	int cv2w = v2w / 4, cv2h = v2h / 4, cv2x = cw - cv2w, cv2y = ch - cv2h;  // dimension and position of video2 in composite video
+	
+	
 	
 	SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER);
 	atexit(SDL_Quit);
 	
-	SDL_Window* win = SDL_CreateWindow("HDSwitch", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, w, h, SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE);
+	SDL_Window* win = SDL_CreateWindow("HDSwitch", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, ww, wh, SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE);
 	SDL_GLContext gl_ctx = SDL_GL_CreateContext(win);
 	//SDL_GL_SetSwapInterval(1);
 	SDL_GL_SetSwapInterval(0);
@@ -299,7 +305,78 @@ int main(int argc, char** argv) {
 	// Setup OpenGL stuff
 	check_required_gl_extentions();
 	
-	drawable_p video = drawable_new(GL_TRIANGLE_STRIP, "shaders/video.vs", "shaders/video.fs");
+	GLuint video1_tex = texture_new(v1w, v1h, GL_RG8);
+	GLuint video2_tex = texture_new(v2w, v2h, GL_RG8);
+	GLuint composite_video_tex  = texture_new(cw, ch, GL_RG8);
+	size_t composite_video_size = cw * ch * 2;
+	void*  composite_video_ptr  = malloc(composite_video_size);
+
+	
+	// Initialize the textures so we don't get random GPU RAM garbage in
+	// our first composite frame when one webcam frame hasn't been uploaded yet
+	GLuint clear_fbo = 0;
+	glGenFramebuffers(1, &clear_fbo);
+	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, clear_fbo);
+		
+		glClearColor(0, 0, 0, 0);
+		
+		glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_RECTANGLE, video1_tex, 0);
+		if (glCheckFramebufferStatus(GL_DRAW_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+			return fprintf(stderr, "Framebuffer setup failed for clear 1\n"), 1;
+		glViewport(0, 0, v1w, v1h);
+		glClear(GL_COLOR_BUFFER_BIT);
+	
+		glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_RECTANGLE, video2_tex, 0);
+		if (glCheckFramebufferStatus(GL_DRAW_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+			return fprintf(stderr, "Framebuffer setup failed for clear 2\n"), 1;
+		glViewport(0, 0, v2w, v2h);
+		glClear(GL_COLOR_BUFFER_BIT);
+		
+	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+	glDeleteFramebuffers(1, &clear_fbo);
+	
+	fbo_p composite_video = fbo_new(composite_video_tex);
+	
+	// Build vertex buffers, use triangle strips for a basic quad. Quads were removed in OpenGL 3.2.
+	drawable_p video_on_composite = drawable_new(GL_TRIANGLE_STRIP, "shaders/video_on_composite.vs", "shaders/video_on_composite.fs");
+	GLuint video1_vertex_buffer = 0, video2_vertex_buffer = 0;
+	{
+		// B D
+		// A C
+		float tri_strip[] = {
+			// pos x                         y                                    tex coord u, v
+			 cv1x         / (cw / 2.0f) - 1, (cv1y + cv1h) / (ch / 2.0f) - 1,       0, v1h,
+			 cv1x         / (cw / 2.0f) - 1,  cv1y         / (ch / 2.0f) - 1,       0,   0,
+			(cv1x + cv1w) / (cw / 2.0f) - 1, (cv1y + cv1h) / (ch / 2.0f) - 1,     v1w, v1h,
+			(cv1x + cv1w) / (cw / 2.0f) - 1,  cv1y         / (ch / 2.0f) - 1,     v1w, 0
+		};
+		video1_vertex_buffer = buffer_new(sizeof(tri_strip), tri_strip);
+	}
+	{
+		float tri_strip[] = {
+			// pos x                         y                                    tex coord u, v
+			 cv2x         / (cw / 2.0f) - 1, (cv2y + cv2h) / (ch / 2.0f) - 1,       0, v2h,
+			 cv2x         / (cw / 2.0f) - 1,  cv2y         / (ch / 2.0f) - 1,       0,   0,
+			(cv2x + cv2w) / (cw / 2.0f) - 1, (cv2y + cv2h) / (ch / 2.0f) - 1,     v2w, v2h,
+			(cv2x + cv2w) / (cw / 2.0f) - 1,  cv2y         / (ch / 2.0f) - 1,     v2w, 0
+		};
+		video2_vertex_buffer = buffer_new(sizeof(tri_strip), tri_strip);
+	}
+	
+	drawable_p gui = drawable_new(GL_TRIANGLE_STRIP, "shaders/video.vs", "shaders/video.fs");
+	gui->texture = composite_video_tex;
+	{
+		float tri_strip[] = {
+			-1.0, -1.0,      0, ch,
+			-1.0,  1.0,      0,  0,
+			 1.0, -1.0,     cw, ch,
+			 1.0,  1.0,     cw,  0
+		};
+		gui->vertex_buffer = buffer_new(sizeof(tri_strip), tri_strip);
+	}
+	
+	
+	/*
 	video->texture = texture_new(w, h, GL_RG8);
 	
 	// Triangle strip for a basic quad. Quads were removed in OpenGL 3.2.
@@ -320,7 +397,7 @@ int main(int argc, char** argv) {
 		 1.0, -0.4375,    w2,  0
 	};
 	video2->vertex_buffer = buffer_new(sizeof(tri_strip2), tri_strip2);
-	
+	*/
 	
 	// Setup sound input and output
 	size_t latency = 5;
@@ -338,16 +415,16 @@ int main(int argc, char** argv) {
 	// Setup camera
 	cam_p cam = cam_open(argv[1]);
 	cam_print_info(cam);
-	cam_setup(cam, __builtin_bswap32('YUYV'), w, h, 30, 1, NULL);
+	cam_setup(cam, __builtin_bswap32('YUYV'), v1w, v1h, 30, 1, NULL);
 	cam_print_frame_rate(cam);
 	
 	cam_p cam2 = cam_open(argv[2]);
 	cam_print_info(cam2);
-	cam_setup(cam2, __builtin_bswap32('YUYV'), w2, h2, 30, 1, NULL);
+	cam_setup(cam2, __builtin_bswap32('YUYV'), v2w, v2h, 30, 1, NULL);
 	cam_print_frame_rate(cam);
 	
 	
-	server_start(w, h);
+	server_start(cw, ch);
 	
 	cam_stream_start(cam, 2);
 	cam_stream_start(cam2, 2);
@@ -372,8 +449,10 @@ int main(int argc, char** argv) {
 					break;
 				}
 				
-				if (event.type == SDL_WINDOWEVENT && event.window.event == SDL_WINDOWEVENT_RESIZED)
-					glViewport(0, 0, event.window.data1, event.window.data2);
+				if (event.type == SDL_WINDOWEVENT && event.window.event == SDL_WINDOWEVENT_RESIZED) {
+					ww = event.window.data1;
+					wh = event.window.data2;
+				}
 			}
 		double sdl_time = time_mark(&mark);
 		
@@ -459,10 +538,8 @@ int main(int argc, char** argv) {
 			cam_buffer_t frame = cam_frame_get(cam);
 			cam_time += time_mark(&mark);
 			
-			texture_update(video->texture, GL_RG, frame.ptr);
+			texture_update(video1_tex, GL_RG, frame.ptr);
 			tex_update_time += time_mark(&mark);
-			
-			server_write_frame(1, SDL_GetTicks() - start_ms, frame.ptr, frame.size);
 			
 			cam_frame_release(cam);
 			
@@ -475,7 +552,7 @@ int main(int argc, char** argv) {
 			cam_buffer_t frame = cam_frame_get(cam2);
 			cam_time += time_mark(&mark);
 			
-			texture_update(video2->texture, GL_RG, frame.ptr);
+			texture_update(video2_tex, GL_RG, frame.ptr);
 			tex_update_time += time_mark(&mark);
 			
 			cam_frame_release(cam2);
@@ -486,8 +563,26 @@ int main(int argc, char** argv) {
 		if (something_to_render) {
 			mark = time_now();
 			
-			drawable_draw(video);
-			drawable_draw(video2);
+			fbo_bind(composite_video);
+				// Clear rest to black (luma 0, cb 0, cr 0 but croma channels are not in [-0.5, 0.5] but in [0, 1])
+				glClearColor(0, 0.5, 0, 0);
+				glClear(GL_COLOR_BUFFER_BIT);
+				
+				video_on_composite->texture = video1_tex;
+				video_on_composite->vertex_buffer = video1_vertex_buffer;
+				drawable_draw(video_on_composite);
+				
+				video_on_composite->texture = video2_tex;
+				video_on_composite->vertex_buffer = video2_vertex_buffer;
+				drawable_draw(video_on_composite);
+			fbo_bind(NULL);
+			
+			fbo_read(composite_video, GL_RG, GL_UNSIGNED_BYTE, composite_video_ptr);
+			server_write_frame(1, SDL_GetTicks() - start_ms, composite_video_ptr, composite_video_size);
+			
+			glViewport(0, 0, ww, wh);
+			
+			drawable_draw(gui);
 			draw_time = time_mark(&mark);
 			
 			SDL_GL_SwapWindow(win);
@@ -526,7 +621,14 @@ int main(int argc, char** argv) {
 	
 	server_close();
 	
-	drawable_destroy(video);
+	drawable_destroy(gui);
+	drawable_destroy(video_on_composite);
+	
+	fbo_destroy(composite_video);
+	texture_destroy(video1_tex);
+	texture_destroy(video2_tex);
+	texture_destroy(composite_video_tex);
+	free(composite_video_ptr);
 	
 	SDL_GL_DeleteContext(gl_ctx);
 	SDL_DestroyWindow(win);
