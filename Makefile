@@ -14,8 +14,9 @@ hdswitch: deps/libSDL2.a hdswitch.o drawable.o stb_image.o cam.o sound.o ebml_wr
 hdswitch.o: deps/libSDL2.a
 hdswitch.o: CFLAGS := $(CFLAGS) -Ideps/include `pkg-config --cflags gl` -Wno-multichar -Wno-unused-but-set-variable -Wno-unused-variable
 
-experiments/v4l2_cam: CFLAGS := $(CFLAGS) -Wno-multichar
-experiments/v4l2_cam: cam.o
+experiments/v4l2_cam: CFLAGS := $(CFLAGS) -Wno-multichar -Wno-unused-variable -Ideps/include `pkg-config --cflags gl`
+experiments/v4l2_cam: LDLIBS = deps/libSDL2.a -ldl -lrt -lm `pkg-config --libs gl`
+experiments/v4l2_cam: cam.o deps/libSDL2.a drawable.o
 
 experiments/alsa: LDLIBS = -lasound
 experiments/alsa_rec: LDLIBS = -lasound
