@@ -1,1 +1,1 @@
-/home/steven/projects/events.mi/smeb/src/ebml_writer.c
+../smeb/src/ebml_writer.c
