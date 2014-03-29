@@ -277,13 +277,105 @@ void server_write_frame(uint8_t track, uint64_t timecode_ms, void* frame_data, s
 	}
 }
 
+typedef struct {
+	char* device_file;
+	size_t w, h;
+	cam_p cam;
+	GLuint tex;
+} video_input_t, *video_input_p;
+
+typedef struct {
+	char    horizontal_anchor;
+	ssize_t x;
+	char    vertical_anchor;
+	ssize_t y;
+	
+	size_t video_idx;
+	ssize_t w, h;
+	
+	GLuint  vertices;
+} video_view_t, *video_view_p;
+
 
 int main(int argc, char** argv) {
-	if (argc != 4) {
-		fprintf(stderr, "usage: %s v4l2-file1 v4l2-file2 alsa-input\n", argv[0]);
+	if (argc != 2) {
+		fprintf(stderr, "usage: %s alsa-input\n", argv[0]);
 		return 1;
 	}
 	
+	video_input_t video_inputs[] = {
+		{ "/dev/video1", 800, 448, NULL, 0 },
+		//{ "/dev/video2", 640, 480, NULL, 0 },
+		{ "/dev/video0", 640, 480, NULL, 0 }
+	};
+	
+	video_view_t *scenes[] = {
+		(video_view_t[]){
+			{ 'l', 0, 'c', 0,     0, -100, 0,     0 },
+			{ 0 }
+		},
+		(video_view_t[]){
+			{ 'l', 0, 'c', 0,     0, -100, 0,     0 },
+			{ 'r', 0, 'b',16,     1,  -33, 0,     0 },
+			{ 0 }
+		},
+		(video_view_t[]){
+			{ 'c', 0, 'c', 0,     1, -100, 0,     0 },
+			{ 0 }
+		}/*,
+		(video_view_t[]){
+			{ 'l', 0, 't', 0,     0, -100, 0,     0 },
+			{ 'r', 0, 'b', 0,     1,  -33, 0,     0 },
+			{ 0 }
+		},
+		(video_view_t[]){
+			{ 'c', 0, 'c', 0,     1, -100, 0,     0 },
+			{ 0 }
+		}*/
+	};
+	
+	// Calculate rest of the configuration
+	size_t video_input_count = sizeof(video_inputs) / sizeof(video_inputs[0]);
+	size_t scene_count = sizeof(scenes) / sizeof(scenes[0]);
+	
+	// Composite (output video) size
+	size_t composite_w = 0, composite_h = 0;
+	for(size_t i = 0; i < video_input_count; i++) {
+		composite_w = (composite_w > video_inputs[i].w) ? composite_w : video_inputs[i].w;
+		composite_h = (composite_h > video_inputs[i].h) ? composite_h : video_inputs[i].h;
+	}
+	
+	// Sizes of individual video views
+	for(size_t i = 0; i < scene_count; i++) {
+		for(size_t j = 0; scenes[i][j].horizontal_anchor != 0; j++) {
+			video_view_p  vv = &scenes[i][j];
+			video_input_p vi = &video_inputs[vv->video_idx];
+			
+			// percent size to pixel size
+			if (vv->w < 0) vv->w = (ssize_t)vi->w * vv->w / -100;
+			if (vv->h < 0) vv->h = (ssize_t)vi->h * vv->h / -100;
+			
+			// calculate aspect ratio correct height if height is 0
+			if (vv->h == 0) vv->h = vv->w * (ssize_t)vi->h / (ssize_t)vi->w;
+			
+			// position (with anchor)
+			switch (vv->horizontal_anchor) {
+				case 'l': /* nothing to do, x already correct*/    break;
+				case 'r': vv->x = composite_w - vv->x - vv->w;     break;
+				case 'c': vv->x = (composite_w - vv->w) / 2 + vv->x; break;
+			}
+			
+			switch (vv->vertical_anchor) {
+				case 't': /* nothing to do, y already correct*/    break;
+				case 'b': vv->y = composite_h - vv->y - vv->h;     break;
+				case 'c': vv->y = (composite_h - vv->h) / 2 + vv->y; break;
+			}
+		}
+	}
+	
+	
+	
+	/*
 	//int v1w = 640, v1h = 480;  // video1 raw dimensions, best for HP Webcam HD 5210: 800x448
 	int v1w = 800, v1h = 448;  // video1 raw dimensions, best for HP Webcam HD 5210: 
 	int v2w = 640, v2h = 480;  // video2 raw dimensions
@@ -291,12 +383,13 @@ int main(int argc, char** argv) {
 	int ww  = cw,  wh  = ch;   // window dimensions
 	int cv1w = v1w,     cv1h = v1h,     cv1x = 0,         cv1y = 0;          // dimension and position of video1 in composite video
 	int cv2w = v2w / 4, cv2h = v2h / 4, cv2x = cw - cv2w, cv2y = ch - cv2h;  // dimension and position of video2 in composite video
-	
+	*/
 	
 	
 	SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER);
 	atexit(SDL_Quit);
 	
+	size_t ww = composite_w, wh = composite_h;
 	SDL_Window* win = SDL_CreateWindow("HDSwitch", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, ww, wh, SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE);
 	SDL_GLContext gl_ctx = SDL_GL_CreateContext(win);
 	//SDL_GL_SetSwapInterval(1);
@@ -305,14 +398,21 @@ int main(int argc, char** argv) {
 	// Setup OpenGL stuff
 	check_required_gl_extentions();
 	
-	GLuint video1_tex = texture_new(v1w, v1h, GL_RG8);
-	GLuint video2_tex = texture_new(v2w, v2h, GL_RG8);
-	GLuint composite_video_tex  = texture_new(cw, ch, GL_RGB8);
-	GLuint stream_video_tex     = texture_new(cw, ch, GL_RG8);
-	size_t stream_video_size = cw * ch * 2;
-	void*  stream_video_ptr  = malloc(stream_video_size);
+	for(size_t i = 0; i < video_input_count; i++) {
+		video_input_p vi = &video_inputs[i];
+		
+		vi->cam = cam_open(vi->device_file);
+		cam_print_info(vi->cam);
+		cam_setup(vi->cam, __builtin_bswap32('YUYV'), vi->w, vi->h, 30, 1, NULL);
+		cam_print_frame_rate(vi->cam);
+		
+		vi->tex = texture_new(vi->w, vi->h, GL_RG8);
+	}
 	
-	GLuint main_tex = video1_tex, small_tex = video2_tex;
+	GLuint composite_video_tex  = texture_new(composite_w, composite_h, GL_RGB8);
+	GLuint stream_video_tex     = texture_new(composite_w, composite_h, GL_RG8);
+	size_t stream_video_size = composite_w * composite_h * 2;
+	void*  stream_video_ptr  = malloc(stream_video_size);
 	
 	
 	// Initialize the textures so we don't get random GPU RAM garbage in
@@ -320,21 +420,18 @@ int main(int argc, char** argv) {
 	GLuint clear_fbo = 0;
 	glGenFramebuffers(1, &clear_fbo);
 	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, clear_fbo);
-		// Black in YCbCr
+		// Clear rest to black (luma 0, cb 0, cr 0 but croma channels are not in [-0.5, 0.5] but in [0, 1] so 0.5 it is)
 		glClearColor(0, 0.5, 0, 0);
 		
-		glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_RECTANGLE, video1_tex, 0);
-		if (glCheckFramebufferStatus(GL_DRAW_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
-			return fprintf(stderr, "Framebuffer setup failed for clear 1\n"), 1;
-		glViewport(0, 0, v1w, v1h);
-		glClear(GL_COLOR_BUFFER_BIT);
-	
-		glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_RECTANGLE, video2_tex, 0);
-		if (glCheckFramebufferStatus(GL_DRAW_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
-			return fprintf(stderr, "Framebuffer setup failed for clear 2\n"), 1;
-		glViewport(0, 0, v2w, v2h);
-		glClear(GL_COLOR_BUFFER_BIT);
-		
+		for(size_t i = 0; i < video_input_count; i++) {
+			video_input_p vi = &video_inputs[i];
+			
+			glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_RECTANGLE, vi->tex, 0);
+			if (glCheckFramebufferStatus(GL_DRAW_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+				return fprintf(stderr, "Framebuffer setup failed to clear video texture\n"), 1;
+			glViewport(0, 0, vi->w, vi->h);
+			glClear(GL_COLOR_BUFFER_BIT);
+		}
 	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
 	glDeleteFramebuffers(1, &clear_fbo);
 	
@@ -342,28 +439,23 @@ int main(int argc, char** argv) {
 	
 	// Build vertex buffers, use triangle strips for a basic quad. Quads were removed in OpenGL 3.2.
 	drawable_p video_on_composite = drawable_new(GL_TRIANGLE_STRIP, "shaders/video_on_composite.vs", "shaders/video_on_composite.fs");
-	GLuint video1_vertex_buffer = 0, video2_vertex_buffer = 0;
-	{
-		// B D
-		// A C
-		float tri_strip[] = {
-			// pos x                         y                                    tex coord u, v
-			 cv1x         / (cw / 2.0f) - 1, (cv1y + cv1h) / (ch / 2.0f) - 1,       0, v1h,
-			 cv1x         / (cw / 2.0f) - 1,  cv1y         / (ch / 2.0f) - 1,       0,   0,
-			(cv1x + cv1w) / (cw / 2.0f) - 1, (cv1y + cv1h) / (ch / 2.0f) - 1,     v1w, v1h,
-			(cv1x + cv1w) / (cw / 2.0f) - 1,  cv1y         / (ch / 2.0f) - 1,     v1w, 0
-		};
-		video1_vertex_buffer = buffer_new(sizeof(tri_strip), tri_strip);
-	}
-	{
-		float tri_strip[] = {
-			// pos x                         y                                    tex coord u, v
-			 cv2x         / (cw / 2.0f) - 1, (cv2y + cv2h) / (ch / 2.0f) - 1,       0, v2h,
-			 cv2x         / (cw / 2.0f) - 1,  cv2y         / (ch / 2.0f) - 1,       0,   0,
-			(cv2x + cv2w) / (cw / 2.0f) - 1, (cv2y + cv2h) / (ch / 2.0f) - 1,     v2w, v2h,
-			(cv2x + cv2w) / (cw / 2.0f) - 1,  cv2y         / (ch / 2.0f) - 1,     v2w, 0
-		};
-		video2_vertex_buffer = buffer_new(sizeof(tri_strip), tri_strip);
+	size_t cw = composite_w, ch = composite_h;
+	for(size_t i = 0; i < scene_count; i++) {
+		for(size_t j = 0; scenes[i][j].horizontal_anchor != 0; j++) {
+			video_view_p  vv = &scenes[i][j];
+			video_input_p vi = &video_inputs[vv->video_idx];
+			
+			// B D
+			// A C
+			float tri_strip[] = {
+				// pos x                           y                                  tex coord u, v
+				 vv->x          / (cw / 2.0f) - 1, (vv->y + vv->h) / (ch / 2.0f) - 1,         0, vi->h,
+				 vv->x          / (cw / 2.0f) - 1,  vv->y          / (ch / 2.0f) - 1,         0,     0,
+				(vv->x + vv->w) / (cw / 2.0f) - 1, (vv->y + vv->h) / (ch / 2.0f) - 1,     vi->w, vi->h,
+				(vv->x + vv->w) / (cw / 2.0f) - 1,  vv->y          / (ch / 2.0f) - 1,     vi->w,     0
+			};
+			vv->vertices = buffer_new(sizeof(tri_strip), tri_strip);
+		}
 	}
 	
 	drawable_p gui = drawable_new(GL_TRIANGLE_STRIP, "shaders/video.vs", "shaders/video.fs");
@@ -418,7 +510,7 @@ int main(int argc, char** argv) {
 	// Setup sound input and output
 	size_t latency = 5;
 	
-	sound_p in = sound_open(argv[3], SOUND_CAPTURE, SOUND_NONBLOCK);
+	sound_p in = sound_open(argv[1], SOUND_CAPTURE, SOUND_NONBLOCK);
 	sound_configure(in, 48000, 2, SOUND_FORMAT_S16, true, latency);
 	
 	sound_p out = sound_open("default", SOUND_PLAYBACK, SOUND_NONBLOCK);
@@ -428,32 +520,20 @@ int main(int argc, char** argv) {
 	size_t buffer_filled = 0;
 	void* buffer = malloc(in->buffer_size);
 	
-	// Setup camera
-	cam_p cam = cam_open(argv[1]);
-	cam_print_info(cam);
-	cam_setup(cam, __builtin_bswap32('YUYV'), v1w, v1h, 30, 1, NULL);
-	cam_print_frame_rate(cam);
-	
-	cam_p cam2 = cam_open(argv[2]);
-	cam_print_info(cam2);
-	cam_setup(cam2, __builtin_bswap32('YUYV'), v2w, v2h, 30, 1, NULL);
-	cam_print_frame_rate(cam2);
-	
-	
+	// Startup
 	server_start(cw, ch);
-	
-	cam_stream_start(cam, 2);
-	cam_stream_start(cam2, 2);
-	
+	for(size_t i = 0; i < video_input_count; i++)
+		cam_stream_start(video_inputs[i].cam, 2);
 	
 	// Prepare mainloop
-	size_t poll_fd_count = 3 + sound_poll_fds_count(in) + sound_poll_fds_count(out);
+	size_t poll_fd_count = 1 + video_input_count + sound_poll_fds_count(in) + sound_poll_fds_count(out);
 	struct pollfd pollfds[poll_fd_count];
 	
 	timeval_t mark;
 	uint32_t start_ms = SDL_GetTicks();
 	size_t overruns = 0, underruns = 0, flushes = 0;
 	bool exit_mainloop = false;
+	size_t scene_idx = 0;
 	while (!exit_mainloop) {
 		
 		// Handle SLD events
@@ -470,11 +550,59 @@ int main(int argc, char** argv) {
 					wh = event.window.data2;
 				}
 				
-				if (event.type == SDL_KEYDOWN && event.key.keysym.sym == SDLK_s) {
-					main_tex ^= small_tex;
-					small_tex ^= main_tex;
-					main_tex ^= small_tex;
+				if (event.type == SDL_KEYDOWN && event.key.keysym.sym >= SDLK_1 && event.key.keysym.sym <= SDLK_9) {
+					size_t num = event.key.keysym.sym - SDLK_1;
+					if (num < scene_count) {
+						printf("switching to scene %zu\n", num);
+						scene_idx = num;
+					}
 				}
+				/*
+				if (event.type == SDL_KEYDOWN) {
+					switch (event.key.keysym.sym) {
+						case SDLK_1:
+							set_controls(cam, (cam_control_t[]){ (cam_control_t){ "Zoom, Absolute", "0" }, (cam_control_t){ NULL } } );
+							cam_print_info(cam);
+							break;
+						case SDLK_2:
+							set_controls(cam, (cam_control_t[]){ (cam_control_t){ "Zoom, Absolute", "2" }, (cam_control_t){ NULL } } );
+							cam_print_info(cam);
+							break;
+						case SDLK_3:
+							set_controls(cam, (cam_control_t[]){ (cam_control_t){ "Zoom, Absolute", "3" }, (cam_control_t){ NULL } } );
+							cam_print_info(cam);
+							break;
+						case SDLK_4:
+							set_controls(cam, (cam_control_t[]){ (cam_control_t){ "Zoom, Absolute", "4" }, (cam_control_t){ NULL } } );
+							cam_print_info(cam);
+							break;
+						case SDLK_5:
+							set_controls(cam, (cam_control_t[]){ (cam_control_t){ "Zoom, Absolute", "5" }, (cam_control_t){ NULL } } );
+							cam_print_info(cam);
+							break;
+						case SDLK_6:
+							set_controls(cam, (cam_control_t[]){ (cam_control_t){ "Zoom, Absolute", "6" }, (cam_control_t){ NULL } } );
+							cam_print_info(cam);
+							break;
+						case SDLK_7:
+							set_controls(cam, (cam_control_t[]){ (cam_control_t){ "Zoom, Absolute", "7" }, (cam_control_t){ NULL } } );
+							cam_print_info(cam);
+							break;
+						case SDLK_8:
+							set_controls(cam, (cam_control_t[]){ (cam_control_t){ "Zoom, Absolute", "8" }, (cam_control_t){ NULL } } );
+							cam_print_info(cam);
+							break;
+						case SDLK_9:
+							set_controls(cam, (cam_control_t[]){ (cam_control_t){ "Zoom, Absolute", "9" }, (cam_control_t){ NULL } } );
+							cam_print_info(cam);
+							break;
+						case SDLK_0:
+							set_controls(cam, (cam_control_t[]){ (cam_control_t){ "Zoom, Absolute", "10" }, (cam_control_t){ NULL } } );
+							cam_print_info(cam);
+							break;
+					}
+				}
+				*/
 			}
 		double sdl_time = time_mark(&mark);
 		
@@ -482,12 +610,14 @@ int main(int argc, char** argv) {
 		time_mark(&mark);
 			size_t poll_fds_used = 0;
 			
-			pollfds[0] = (struct pollfd){ .fd = cam->fd, .events = POLLIN, .revents = 0 };
+			pollfds[0] = (struct pollfd){ .fd = server_fd, .events = POLLIN, .revents = 0 };
 			poll_fds_used++;
-			pollfds[1] = (struct pollfd){ .fd = cam2->fd, .events = POLLIN, .revents = 0 };
-			poll_fds_used++;
-			pollfds[2] = (struct pollfd){ .fd = server_fd, .events = POLLIN, .revents = 0 };
-			poll_fds_used++;
+			
+			for(size_t i = 0; i < video_input_count; i++) {
+				video_input_p vi = &video_inputs[i];
+				pollfds[1 + i] = (struct pollfd){ .fd = vi->cam->fd, .events = POLLIN, .revents = 0 };
+				poll_fds_used++;
+			}
 			
 			struct pollfd* in_poll_fds = pollfds + poll_fds_used;
 			size_t in_poll_fd_count = sound_poll_fds(in,  pollfds + poll_fds_used, poll_fd_count - poll_fds_used);
@@ -551,52 +681,42 @@ int main(int argc, char** argv) {
 			flushes++;
 		}
 		
+		// Upload new video frames to the GPU
 		bool something_to_render = false;
+		for(size_t i = 0; i < video_input_count; i++) {
+			video_input_p vi = &video_inputs[i];
+			
+			if (pollfds[1 + i].revents & POLLIN) {
+				mark = time_now();
+				
+				cam_buffer_t frame = cam_frame_get(vi->cam);
+				cam_time += time_mark(&mark);
+				
+				texture_update(vi->tex, GL_RG, frame.ptr);
+				tex_update_time += time_mark(&mark);
+				
+				cam_frame_release(vi->cam);
+				
+				something_to_render = true;
+			}
+		}
 		
 		// Render new video frames
-		if (pollfds[0].revents & POLLIN) {
-			mark = time_now();
-			
-			cam_buffer_t frame = cam_frame_get(cam);
-			cam_time += time_mark(&mark);
-			
-			texture_update(video1_tex, GL_RG, frame.ptr);
-			tex_update_time += time_mark(&mark);
-			
-			cam_frame_release(cam);
-			
-			something_to_render = true;
-		}
-		
-		if (pollfds[1].revents & POLLIN) {
-			mark = time_now();
-			
-			cam_buffer_t frame = cam_frame_get(cam2);
-			cam_time += time_mark(&mark);
-			
-			texture_update(video2_tex, GL_RG, frame.ptr);
-			tex_update_time += time_mark(&mark);
-			
-			cam_frame_release(cam2);
-			
-			something_to_render = true;
-		}
-		
 		if (something_to_render) {
+			video_view_p scene = scenes[scene_idx];
 			mark = time_now();
 			
 			fbo_bind(composite_video);
-				// Clear rest to black (luma 0, cb 0, cr 0 but croma channels are not in [-0.5, 0.5] but in [0, 1])
-				glClearColor(0, 0.5, 0, 0);
+				glClearColor(0, 0, 0, 0);
 				glClear(GL_COLOR_BUFFER_BIT);
 				
-				video_on_composite->texture = main_tex;
-				video_on_composite->vertex_buffer = video1_vertex_buffer;
-				drawable_draw(video_on_composite);
-				
-				video_on_composite->texture = small_tex;
-				video_on_composite->vertex_buffer = video2_vertex_buffer;
-				drawable_draw(video_on_composite);
+				for(video_view_p vv = scene; vv->horizontal_anchor != 0; vv++) {
+					video_input_p vi = &video_inputs[vv->video_idx];
+					
+					video_on_composite->texture = vi->tex;
+					video_on_composite->vertex_buffer = vv->vertices;
+					drawable_draw(video_on_composite);
+				}
 				
 			fbo_bind(stream_fbo);
 				
@@ -617,7 +737,7 @@ int main(int argc, char** argv) {
 		}
 		
 		// Accept new clients
-		if (pollfds[2].revents & POLLIN)
+		if (pollfds[0].revents & POLLIN)
 			server_accept();
 		
 		
@@ -641,10 +761,21 @@ int main(int argc, char** argv) {
 	sound_close(in);
 	sound_close(out);
 	
-	cam_stream_stop(cam);
-	cam_close(cam);
-	cam_stream_stop(cam2);
-	cam_close(cam2);
+	for(size_t i = 0; i < video_input_count; i++) {
+		video_input_p vi = &video_inputs[i];
+		
+		cam_stream_stop(vi->cam);
+		cam_close(vi->cam);
+		
+		texture_destroy(vi->tex);
+	}
+	
+	for(size_t i = 0; i < scene_count; i++) {
+		for(size_t j = 0; scenes[i][j].horizontal_anchor != 0; j++) {
+			video_view_p  vv = &scenes[i][j];
+			buffer_destroy(vv->vertices);
+		}
+	}
 	
 	server_close();
 	
@@ -654,8 +785,6 @@ int main(int argc, char** argv) {
 	
 	fbo_destroy(stream_fbo);
 	fbo_destroy(composite_video);
-	texture_destroy(video1_tex);
-	texture_destroy(video2_tex);
 	texture_destroy(composite_video_tex);
 	free(stream_video_ptr);
 	
