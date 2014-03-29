@@ -27,6 +27,7 @@ cam_p cam_open(const char* camera_file);
 void  cam_close(cam_p cam);
 
 void  cam_setup(cam_p cam, uint32_t pixel_format, uint32_t width, uint32_t height, uint32_t frame_rate_num, uint32_t frame_rate_den, cam_control_t controls[]);
+bool  cam_set_controls(cam_p cam, cam_control_t controls[]);
 void  cam_print_info(cam_p cam);
 bool  cam_print_frame_rate(cam_p cam);
 

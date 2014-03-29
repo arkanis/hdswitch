@@ -23,7 +23,6 @@ static void show_resolution_frame_rates(int fd, uint32_t pixel_format, uint32_t 
 static void show_controls(int fd);
 static bool set_pixel_format_and_resolution(cam_p cam, uint32_t pixel_format, uint32_t width, uint32_t height);
 static bool set_frame_rate(cam_p cam, uint32_t frame_interval_num, uint32_t frame_interval_den);
-static bool set_controls(cam_p cam, cam_control_t controls[]);
 static bool map_buffers(cam_p cam, size_t buffer_count);
 static bool unmap_buffers(cam_p cam);
 
@@ -66,7 +65,7 @@ void cam_close(cam_p cam){
 void cam_setup(cam_p cam, uint32_t pixel_format, uint32_t width, uint32_t height, uint32_t frame_rate_num, uint32_t frame_rate_den, cam_control_t controls[]){
 	set_pixel_format_and_resolution(cam, pixel_format, width, height);
 	set_frame_rate(cam, frame_rate_num, frame_rate_den);
-	set_controls(cam, controls);
+	cam_set_controls(cam, controls);
 }
 
 void cam_print_info(cam_p cam){
@@ -281,57 +280,10 @@ static void show_controls(int fd){
 		"bitmask",
 		"integer_menu"
 	};
-	/*
-	struct v4l2_queryctrl control = {0};
-	
-	printf("Controls:\n");
-	for(control.id = V4L2_CID_BASE; control.id < V4L2_CID_LASTP1; control.id++){
-		if ( ioctl(fd, VIDIOC_QUERYCTRL, &control) == -1 ) {
-			if (errno == EINVAL)
-				continue;
-			perror("VIDIOC_QUERYCTRL ioctl() failed");
-			break;
-		}
-		
-		if (control.flags & V4L2_CTRL_FLAG_DISABLED)
-			continue;
-		
-		struct v4l2_control control_value = {control.id, 0};
-		if ( ioctl(fd, VIDIOC_G_CTRL, &control_value) == -1 )
-			perror("VIDIOC_G_CTRL ioctl() failed");
-		
-		if (control.type == V4L2_CTRL_TYPE_MENU || control.type == V4L2_CTRL_TYPE_INTEGER_MENU) {
-			printf("- %s: %d (%s)\n", control.name, control_value.value, type_names[control.type]);
-			
-			struct v4l2_querymenu menu_entry = {0};
-			for(ssize_t i = control.minimum; i <= control.maximum; i++){
-				menu_entry.id = control.id;
-				menu_entry.index = i;
-				
-				if ( ioctl(fd, VIDIOC_QUERYMENU, &menu_entry) == -1 ) {
-					perror("VIDIOC_QUERYMENU ioctl() failed");
-					continue;
-				}
-				
-				if (control.type == V4L2_CTRL_TYPE_MENU)
-					printf("  %d: %s\n", menu_entry.index, menu_entry.name);
-				else
-					printf("  %d: %lld\n", menu_entry.index, menu_entry.value);
-			}
-			
-		} else {
-			printf("- %s: %d (%s, values in [%d, %d] step %d)\n",
-				control.name, control_value.value, type_names[control.type], control.minimum, control.maximum, control.step);
-		}
-	}
-	*/
 	
 	printf("Extended controls:\n");
 	struct v4l2_queryctrl control = {0};
-	
-	control.id = V4L2_CTRL_FLAG_NEXT_CTRL;
-	while ( ioctl (fd, VIDIOC_QUERYCTRL, &control) == 0) {
-		
+	for(control.id = V4L2_CTRL_FLAG_NEXT_CTRL; ioctl(fd, VIDIOC_QUERYCTRL, &control) == 0; control.id |= V4L2_CTRL_FLAG_NEXT_CTRL) {
 		if (control.flags & V4L2_CTRL_FLAG_DISABLED) {
 			printf("- DISABLED: ");
 		} else {
@@ -365,10 +317,7 @@ static void show_controls(int fd){
 			printf("%s: %d (%s, values in [%d, %d] step %d)\n",
 				control.name, control_value.value, type_names[control.type], control.minimum, control.maximum, control.step);
 		}
-		
-		control.id |= V4L2_CTRL_FLAG_NEXT_CTRL;
 	}
-
 }
 
 bool cam_print_frame_rate(cam_p cam) {
@@ -466,7 +415,7 @@ static bool set_frame_rate(cam_p cam, uint32_t frame_rate_num, uint32_t frame_ra
 /**
  * Sets the v4l2 user controls to values specified by the user. Example:
  * 
- *   set_controls(cam, (cam_control_t[]){
+ *   cam_set_controls(cam, (cam_control_t[]){
  *     { "Contrast", "0" },
  *     { "Power Line Frequency", "50 Hz" },
  *     { "Sharpness", "2" },
@@ -479,21 +428,13 @@ static bool set_frame_rate(cam_p cam, uint32_t frame_rate_num, uint32_t frame_ra
  * of the menu item has to be specified as value. For other control types the value is
  * set as an integer.
  */
-static bool set_controls(cam_p cam, cam_control_t controls[]){
+bool cam_set_controls(cam_p cam, cam_control_t controls[]){
 	// Do nothing if we get no controls array
 	if (controls == NULL)
 		return true;
 	
 	struct v4l2_queryctrl control = {0};
-	
-	for(control.id = V4L2_CID_BASE; control.id < V4L2_CID_LASTP1; control.id++){
-		if ( ioctl(cam->fd, VIDIOC_QUERYCTRL, &control) == -1 ) {
-			if (errno == EINVAL)
-				continue;
-			perror("VIDIOC_QUERYCTRL ioctl() failed");
-			break;
-		}
-		
+	for(control.id = V4L2_CTRL_FLAG_NEXT_CTRL; ioctl(cam->fd, VIDIOC_QUERYCTRL, &control) == 0; control.id |= V4L2_CTRL_FLAG_NEXT_CTRL) {
 		if (control.flags & V4L2_CTRL_FLAG_DISABLED)
 			continue;
 		
