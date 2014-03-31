@@ -26,6 +26,16 @@ void main(){
 	float cb = texture2DRect(tex, tex_coords + vec2(-x_mod_2 + 0.5, 0.5)).g;
 	float cr = texture2DRect(tex, tex_coords + vec2(-x_mod_2 + 1.5, 0.5)).g;
 	
+	// ITU-R BT.601 conversation using limited YCbCr color space (seems like webcams are using this colorspace)
+	// http://en.wikipedia.org/wiki/YCbCr
+	gl_FragColor = vec4(
+		(298.082 / 256.0) * y                          + (408.583 / 256.0) * cr - (222.921 / 256.0),
+		(298.082 / 256.0) * y - (100.291 / 256.0) * cb - (208.120 / 256.0) * cr + (135.576 / 256.0),
+		(298.082 / 256.0) * y + (516.412 / 256.0) * cb                          - (276.836 / 256.0),
+		1
+	);
+	
+	/*
 	// JPEG color conversion with full Cb and Cr spectrum from Wikipedia (http://en.wikipedia.org/wiki/YCbCr)
 	gl_FragColor = vec4(
 		y                         + 1.402   * (cr - 0.5),
@@ -33,4 +43,5 @@ void main(){
 		y + 1.772    * (cb - 0.5),
 		1
 	);
+	*/
 }
