@@ -25,6 +25,8 @@ experiments/fbo: CFLAGS := $(CFLAGS) -Ideps/include `pkg-config --cflags gl`
 experiments/fbo: LDLIBS = deps/libSDL2.a -ldl -lrt -lm `pkg-config --libs gl`
 experiments/fbo: deps/libSDL2.a drawable.o stb_image.o
 
+experiments/pulse: CFLAGS := $(CFLAGS) -Wno-unused-parameter
+experiments/pulse: LDLIBS  = -lpulse
 
 #
 # Special parameters for some objects files not really under our control
