@@ -16,14 +16,15 @@ static void stream_read_cb(pa_stream *s, size_t length, void *userdata);
 static int signals_init();
 static int signals_cleanup(int signal_fd);
 
-const uint32_t latency_ms = 10;
+const uint32_t latency_ms = 200;
+const uint32_t mixer_buffer_time_ms = 100;
 
 pa_mainloop* pa_ml = NULL;
 pa_context* context = NULL;
 
 typedef struct stream_s stream_t, *stream_p;
 struct stream_s {
-	uint64_t pts;
+	size_t mixer_offset;
 	pa_stream* stream;
 	stream_p next;
 };
@@ -31,8 +32,21 @@ stream_p streams = NULL;
 pa_stream* out_stream = NULL;
 
 
+pa_sample_spec mixer_sample_spec = {
+	.format   = PA_SAMPLE_S16LE,
+	.rate     = 48000,
+	.channels = 2
+};
+int16_t mixer_buffer_ptr = NULL;
+size_t   mixer_buffer_size = 0;
+uint64_t mixer_pts = 0;
+
+
 int main() {
 	int signal_fd = signals_init();
+	
+	mixer_buffer_size = pa_usec_to_bytes(mixer_buffer_time_ms * PA_USEC_PER_MSEC, &mixer_sample_spec);
+	mixer_buffer_ptr = malloc(mixer_buffer_size);
 	
 	pa_ml = pa_mainloop_new();
 	pa_mainloop_api* pa_api = pa_mainloop_get_api(pa_ml);
@@ -47,6 +61,7 @@ int main() {
 		//printf("dispatched %d events\n", dispached_events);
 	}
 	
+	free(mixer_buffer_ptr);
 	pa_context_disconnect(context);
 	signals_cleanup(signal_fd);
 	
@@ -68,17 +83,16 @@ static void signals_cb(pa_mainloop_api *ea, pa_io_event *e, int fd, pa_io_event_
 
 static void context_state_cb(pa_context *c, void *userdata) {
 	switch (pa_context_get_state(c)) {
-	    case PA_CONTEXT_UNCONNECTED:  printf("PA_CONTEXT_UNCONNECTED\n");  break;
-	    case PA_CONTEXT_CONNECTING:   printf("PA_CONTEXT_CONNECTING\n");   break;
-	    case PA_CONTEXT_AUTHORIZING:  printf("PA_CONTEXT_AUTHORIZING\n");  break;
-	    case PA_CONTEXT_SETTING_NAME: printf("PA_CONTEXT_SETTING_NAME\n"); break;
-	    case PA_CONTEXT_READY:        printf("PA_CONTEXT_READY\n");
-	    	pa_context_get_source_info_list(c, source_info_list_cb, NULL);
-	    	
-	    	break;
-	    case PA_CONTEXT_FAILED:       printf("PA_CONTEXT_FAILED\n");     break;
-	    case PA_CONTEXT_TERMINATED:   printf("PA_CONTEXT_TERMINATED\n"); break;
-	    default: break;
+		case PA_CONTEXT_UNCONNECTED:  printf("PA_CONTEXT_UNCONNECTED\n");  break;
+		case PA_CONTEXT_CONNECTING:   printf("PA_CONTEXT_CONNECTING\n");   break;
+		case PA_CONTEXT_AUTHORIZING:  printf("PA_CONTEXT_AUTHORIZING\n");  break;
+		case PA_CONTEXT_SETTING_NAME: printf("PA_CONTEXT_SETTING_NAME\n"); break;
+		case PA_CONTEXT_READY:        printf("PA_CONTEXT_READY\n");
+			pa_context_get_source_info_list(c, source_info_list_cb, NULL);
+			break;
+		case PA_CONTEXT_FAILED:       printf("PA_CONTEXT_FAILED\n");     break;
+		case PA_CONTEXT_TERMINATED:   printf("PA_CONTEXT_TERMINATED\n"); break;
+		default: break;
 	}
 	
 	return;
@@ -87,14 +101,13 @@ static void context_state_cb(pa_context *c, void *userdata) {
 static void source_info_list_cb(pa_context *c, const pa_source_info *i, int eol, void *userdata) {
 	// Source list finished, create the playback stream
 	if (i == NULL) {
-		const pa_sample_spec* in_sample_spec = pa_stream_get_sample_spec(streams->stream);
-		out_stream = pa_stream_new(c, "HDswitch", in_sample_spec, NULL);
+		out_stream = pa_stream_new(c, "HDswitch", &mixer_sample_spec, NULL);
 		
 		pa_buffer_attr buffer_attr = { 0 };
 		buffer_attr.maxlength = (uint32_t) -1;
 		buffer_attr.prebuf = (uint32_t) -1;
 		buffer_attr.fragsize = (uint32_t) -1;
-		buffer_attr.tlength = pa_usec_to_bytes(latency_ms * PA_USEC_PER_MSEC, in_sample_spec);
+		buffer_attr.tlength = pa_usec_to_bytes(latency_ms * PA_USEC_PER_MSEC, &mixer_sample_spec);
 		buffer_attr.minreq = (uint32_t) -1;
 		
 		pa_stream_connect_playback(out_stream, NULL, &buffer_attr, PA_STREAM_ADJUST_LATENCY, NULL, NULL);
@@ -134,10 +147,10 @@ static void source_info_list_cb(pa_context *c, const pa_source_info *i, int eol,
 		printf("- %s: %s\n", key, pa_proplist_gets(i->proplist, key));
 	}
 	
-	pa_stream* stream = pa_stream_new(c, "HDswitch", &i->sample_spec, NULL);
+	pa_stream* stream = pa_stream_new(c, "HDswitch", &mixer_sample_spec, NULL);
 	
 	stream_p stream_data = malloc(sizeof(stream_t));
-	stream_data->pts = 0;
+	stream_data->mixer_offset = 0;
 	stream_data->next = streams;
 	stream_data->stream = stream;
 	streams = stream_data;
@@ -146,7 +159,7 @@ static void source_info_list_cb(pa_context *c, const pa_source_info *i, int eol,
 	pa_buffer_attr buffer_attr = { 0 };
 	buffer_attr.maxlength = (uint32_t) -1;
 	buffer_attr.prebuf = (uint32_t) -1;
-	buffer_attr.fragsize = pa_usec_to_bytes(latency_ms * PA_USEC_PER_MSEC, &i->sample_spec);
+	buffer_attr.fragsize = pa_usec_to_bytes(latency_ms * PA_USEC_PER_MSEC, &mixer_sample_spec);
 	buffer_attr.tlength = (uint32_t) -1;
 	buffer_attr.minreq = (uint32_t) -1;
 	
@@ -167,7 +180,10 @@ static void stream_read_cb(pa_stream *s, size_t length, void *userdata) {
 			fprintf(stderr, "Read failed\n");
 			return;
 		}
-		stream_data->pts += data_size / pa_frame_size(sample_spec);
+		
+		memcpy(mixer_buffer_ptr + stream_data->mixer_offset, data_ptr, data_size);
+		stream_data->mixer_offset += data_size;
+		
 		/*
 		fprintf(stderr, "Stream %p: got %4zu bytes, %5.2f ms       ", s, data_size, pa_bytes_to_usec(data_size, sample_spec) / 1000.0);
 		size_t i = 0;
