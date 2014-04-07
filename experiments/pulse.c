@@ -16,7 +16,7 @@ static void stream_read_cb(pa_stream *s, size_t length, void *userdata);
 static int signals_init();
 static int signals_cleanup(int signal_fd);
 
-const uint32_t latency_ms = 200;
+const uint32_t latency_ms = 10;
 const uint32_t mixer_buffer_time_ms = 100;
 
 pa_mainloop* pa_ml = NULL;
@@ -37,7 +37,7 @@ pa_sample_spec mixer_sample_spec = {
 	.rate     = 48000,
 	.channels = 2
 };
-int16_t mixer_buffer_ptr = NULL;
+int16_t* mixer_buffer_ptr = NULL;
 size_t   mixer_buffer_size = 0;
 uint64_t mixer_pts = 0;
 
@@ -47,6 +47,7 @@ int main() {
 	
 	mixer_buffer_size = pa_usec_to_bytes(mixer_buffer_time_ms * PA_USEC_PER_MSEC, &mixer_sample_spec);
 	mixer_buffer_ptr = malloc(mixer_buffer_size);
+	memset(mixer_buffer_ptr, 0, mixer_buffer_size);
 	
 	pa_ml = pa_mainloop_new();
 	pa_mainloop_api* pa_api = pa_mainloop_get_api(pa_ml);
@@ -117,6 +118,11 @@ static void source_info_list_cb(pa_context *c, const pa_source_info *i, int eol,
 	if ( !(i->flags & PA_SOURCE_HARDWARE) )
 		return;
 	
+	/* use to only record the first stream
+	if (streams != NULL)
+		return;
+	*/
+	
 	printf("name: %s\n", i->name);
 	printf("index: %u\n", i->index);
 	printf("description: %s\n", i->description);
@@ -169,20 +175,34 @@ static void source_info_list_cb(pa_context *c, const pa_source_info *i, int eol,
 }
 
 static void stream_read_cb(pa_stream *s, size_t length, void *userdata) {
-	const void *data_ptr;
+	const void *buffer_ptr;
 	size_t data_size;
 	stream_p stream_data = userdata;
-	const pa_sample_spec* sample_spec = pa_stream_get_sample_spec(s);
+	//const pa_sample_spec* sample_spec = pa_stream_get_sample_spec(s);
 	
 	while (pa_stream_readable_size(s) > 0) {
 		// peek actually creates and fills the data vbl
-		if (pa_stream_peek(s, &data_ptr, &data_size) < 0) {
+		if (pa_stream_peek(s, &buffer_ptr, &data_size) < 0) {
 			fprintf(stderr, "Read failed\n");
 			return;
 		}
 		
-		memcpy(mixer_buffer_ptr + stream_data->mixer_offset, data_ptr, data_size);
-		stream_data->mixer_offset += data_size;
+		// Mix new sample into the mixer buffer
+		const int16_t* data_ptr = buffer_ptr;
+		int16_t* mixer_data_ptr = mixer_buffer_ptr + stream_data->mixer_offset;
+		for(size_t i = 0; i < data_size / sizeof(data_ptr[0]); i++) {
+			int16_t a = mixer_data_ptr[i], b = data_ptr[i];
+			if (a < 0 && b < 0)
+				mixer_data_ptr[i] = (a + b) - (a * b) / INT16_MIN;
+			else if (a > 0 && b > 0)
+				mixer_data_ptr[i] = (a + b) - (a * b) / INT16_MAX;
+			else
+				mixer_data_ptr[i] = a + b;
+		}
+		stream_data->mixer_offset += data_size / sizeof(data_ptr[0]);
+		
+		//memcpy(mixer_buffer_ptr + stream_data->mixer_offset, data_ptr, data_size);
+		//stream_data->mixer_offset += data_size;
 		
 		/*
 		fprintf(stderr, "Stream %p: got %4zu bytes, %5.2f ms       ", s, data_size, pa_bytes_to_usec(data_size, sample_spec) / 1000.0);
@@ -195,10 +215,34 @@ static void stream_read_cb(pa_stream *s, size_t length, void *userdata) {
 		fprintf(stderr, "\n");
 		*/
 		
-		pa_stream_write(out_stream, data_ptr, data_size, NULL, 0, PA_SEEK_RELATIVE);
+		//pa_stream_write(out_stream, data_ptr, data_size, NULL, 0, PA_SEEK_RELATIVE);
 		
 		// swallow the data peeked at before
 		pa_stream_drop(s);
+	}
+	
+	// Check if a part of the mixer buffer has been written to by all streams. In that case
+	// this part contains data from all streams and can be written out.
+	size_t min_mixer_offset = (size_t)-1, max_mixer_offset = 0;
+	for(stream_p s = streams; s != NULL; s = s->next) {
+		if (s->mixer_offset < min_mixer_offset)
+			min_mixer_offset = s->mixer_offset;
+		if (s->mixer_offset > max_mixer_offset)
+			max_mixer_offset = s->mixer_offset;
+	}
+	
+	if (min_mixer_offset > 0) {
+		pa_stream_write(out_stream, mixer_buffer_ptr, min_mixer_offset * sizeof(mixer_buffer_ptr[0]), NULL, 0, PA_SEEK_RELATIVE);
+		
+		size_t still_used_length = max_mixer_offset - min_mixer_offset;
+		if (still_used_length > 0) {
+			memmove(mixer_buffer_ptr, mixer_buffer_ptr + min_mixer_offset, still_used_length * sizeof(mixer_buffer_ptr[0]));
+			memset(mixer_buffer_ptr + still_used_length, 0, (max_mixer_offset - still_used_length) * sizeof(mixer_buffer_ptr[0]));
+		}
+		
+		//printf("wrote %zu bytes, ");
+		for(stream_p s = streams; s != NULL; s = s->next)
+			s->mixer_offset -= min_mixer_offset;
 	}
 }
 
