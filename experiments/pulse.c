@@ -13,7 +13,7 @@
 
 // Config variables
 const uint32_t latency_ms = 10;
-const uint32_t mixer_buffer_time_ms = 100;
+const uint32_t mixer_buffer_time_ms = 1000;
 
 
 static void signals_cb(pa_mainloop_api *ea, pa_io_event *e, int fd, pa_io_event_flags_t events, void *userdata);
@@ -29,7 +29,7 @@ pa_context* context = NULL;
 
 typedef struct stream_s stream_t, *stream_p;
 struct stream_s {
-	size_t bytes_in_mixer_buffer;
+	ssize_t bytes_in_mixer_buffer;
 	pa_stream* stream;
 	char* name;
 	stream_p next;
@@ -155,10 +155,10 @@ static void source_info_list_cb(pa_context *c, const pa_source_info *i, int eol,
 	pa_stream* stream = pa_stream_new(c, "HDswitch", &mixer_sample_spec, NULL);
 	
 	stream_p stream_data = malloc(sizeof(stream_t));
-	stream_data->bytes_in_mixer_buffer = 0;
+	stream_data->bytes_in_mixer_buffer = -1;
 	stream_data->next = streams;
 	stream_data->stream = stream;
-	stream_data->name = strdup(i->name);
+	stream_data->name = strdup(i->description);
 	streams = stream_data;
 	pa_stream_set_read_callback(stream, stream_read_cb, stream_data);
 	
@@ -179,15 +179,33 @@ static void stream_read_cb(pa_stream *s, size_t length, void *userdata) {
 	size_t in_buffer_size;
 	stream_p stream_data = userdata;
 	
+	// Initialize the byte offset only as soon as we got the first data packet.
+	// Otherwise always waits for this stream from it's start to the arival of the first packet.
+	if (stream_data->bytes_in_mixer_buffer == -1)
+		stream_data->bytes_in_mixer_buffer = 0;
+	
+	printf("stream_read_cb, stream %p, %6zu bytes\n", s, length);
+	
 	while (pa_stream_readable_size(s) > 0) {
 		// peek actually creates and fills the data vbl
 		if (pa_stream_peek(s, &in_buffer_ptr, &in_buffer_size) < 0) {
-			fprintf(stderr, "Read failed\n");
+			fprintf(stderr, "  Read failed\n");
 			return;
 		}
 		
+		if (in_buffer_ptr == NULL && in_buffer_size) {
+			printf("  buffer is empty! no idea what to do.\n");
+			continue;
+		}
+		
+		if (in_buffer_ptr == NULL && in_buffer_size > 0) {
+			printf("  hole of %zu bytes! don't add to mixer buffer.\n", in_buffer_size);
+			stream_data->bytes_in_mixer_buffer += in_buffer_size;
+			continue;
+		}
+		
 		if (stream_data->bytes_in_mixer_buffer + in_buffer_size > mixer_buffer_size) {
-			printf("mixer buffer overflow from %s, retrying audio package next time\r", stream_data->name);
+			printf("  mixer buffer overflow from %s, retrying audio package next time\n", stream_data->name);
 			break;
 		}
 		
@@ -213,13 +231,21 @@ static void stream_read_cb(pa_stream *s, size_t length, void *userdata) {
 	
 	// Check if a part of the mixer buffer has been written to by all streams. In that case
 	// this part contains data from all streams and can be written out.
-	size_t min_bytes_in_mixer = (size_t)-1, max_bytes_in_mixer = 0;
+	printf("  mixer bytes: ");
+	ssize_t min_bytes_in_mixer = INT32_MAX, max_bytes_in_mixer = 0;
 	for(stream_p s = streams; s != NULL; s = s->next) {
+		printf("%4zd ", s->bytes_in_mixer_buffer);
+		
+		// Ignore streams that have not yet received any data
+		if (s->bytes_in_mixer_buffer == -1)
+			continue;
+		
 		if (s->bytes_in_mixer_buffer < min_bytes_in_mixer)
 			min_bytes_in_mixer = s->bytes_in_mixer_buffer;
 		if (s->bytes_in_mixer_buffer > max_bytes_in_mixer)
 			max_bytes_in_mixer = s->bytes_in_mixer_buffer;
 	}
+	printf("lag: %4zu bytes, %.1f ms\n", max_bytes_in_mixer - min_bytes_in_mixer, pa_bytes_to_usec(max_bytes_in_mixer - min_bytes_in_mixer, &mixer_sample_spec) / 1000.0);
 	
 	if (min_bytes_in_mixer > 0) {
 		pa_stream_write(out_stream, mixer_buffer_ptr, min_bytes_in_mixer, NULL, 0, PA_SEEK_RELATIVE);
@@ -230,8 +256,13 @@ static void stream_read_cb(pa_stream *s, size_t length, void *userdata) {
 			memset(mixer_buffer_ptr + incomplete_mixer_bytes, 0, max_bytes_in_mixer - incomplete_mixer_bytes);
 		}
 		
-		for(stream_p s = streams; s != NULL; s = s->next)
+		for(stream_p s = streams; s != NULL; s = s->next) {
+			// Ignore streams that have not yet received any data
+			if (s->bytes_in_mixer_buffer == -1)
+				continue;
+			
 			s->bytes_in_mixer_buffer -= min_bytes_in_mixer;
+		}
 	}
 }
 
@@ -262,6 +293,13 @@ static void signals_cb(pa_mainloop_api *ea, pa_io_event *e, int fd, pa_io_event_
 	struct signalfd_siginfo siginfo = {0};
 	if ( read(fd, &siginfo, sizeof(siginfo)) > 0 ) {
 		printf("got signal %u from pid %u\n", siginfo.ssi_signo, siginfo.ssi_pid);
+		
+		for(stream_p s = streams; s != NULL; s = s->next) {
+			pa_stream_disconnect(s->stream);
+			pa_stream_unref(s->stream);
+			s->stream = NULL;
+		}
+		
 		pa_mainloop_quit(pa_ml, 0);
 	} else {
 		perror("read(signalfd)");
