@@ -20,6 +20,7 @@ experiments/v4l2_cam: cam.o deps/libSDL2.a drawable.o
 
 experiments/alsa: LDLIBS = -lasound
 experiments/alsa_rec: LDLIBS = -lasound
+experiments/alsa_pcm_list: LDLIBS = -lasound
 
 experiments/fbo: CFLAGS := $(CFLAGS) -Ideps/include `pkg-config --cflags gl`
 experiments/fbo: LDLIBS = deps/libSDL2.a -ldl -lrt -lm `pkg-config --libs gl`

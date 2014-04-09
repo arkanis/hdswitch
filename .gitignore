@@ -7,3 +7,4 @@ experiments/v4l2_cam
 experiments/alsa
 experiments/alsa_rec
 experiments/fbo
+experiments/alsa_pcm_list
