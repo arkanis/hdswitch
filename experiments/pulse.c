@@ -24,9 +24,6 @@ static int signals_init();
 static int signals_cleanup(int signal_fd);
 
 
-pa_mainloop* pa_ml = NULL;
-pa_context* context = NULL;
-
 typedef struct stream_s stream_t, *stream_p;
 struct stream_s {
 	ssize_t bytes_in_mixer_buffer;
@@ -56,9 +53,9 @@ int main() {
 	mixer_buffer_ptr = malloc(mixer_buffer_size);
 	memset(mixer_buffer_ptr, 0, mixer_buffer_size);
 	
-	pa_ml = pa_mainloop_new();
+	pa_mainloop* pa_ml = pa_mainloop_new();
 	pa_mainloop_api* pa_api = pa_mainloop_get_api(pa_ml);
-	context = pa_context_new(pa_api, "HDswitch");
+	pa_context* context = pa_context_new(pa_api, "HDswitch");
 	
 	pa_context_set_state_callback(context, context_state_cb, NULL);
 	pa_context_connect(context, NULL, 0, NULL);
@@ -300,7 +297,7 @@ static void signals_cb(pa_mainloop_api *ea, pa_io_event *e, int fd, pa_io_event_
 			s->stream = NULL;
 		}
 		
-		pa_mainloop_quit(pa_ml, 0);
+		ea->quit(ea, 0);
 	} else {
 		perror("read(signalfd)");
 	}

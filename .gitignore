@@ -8,3 +8,4 @@ experiments/alsa
 experiments/alsa_rec
 experiments/fbo
 experiments/alsa_pcm_list
+experiments/pulse
