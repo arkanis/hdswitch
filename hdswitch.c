@@ -2,8 +2,8 @@
 
 Test commands for output:
 
-ffplay unix:///home/steven/projects/events.mi/hdswitch/server.sock
-ffmpeg -y -i unix:///home/steven/projects/events.mi/hdswitch/server.sock -f webm - | ffmpeg2theora --output /dev/stdout --format webm - | oggfwd -p -n event icecast.mi.hdm-stuttgart.de 80 xV2kxUG3 /test.ogv
+ffplay unix:server.sock
+ffmpeg -y -i unix:server.sock -f webm - | ffmpeg2theora --output /dev/stdout --format webm - | oggfwd -p -n event icecast.mi.hdm-stuttgart.de 80 xV2kxUG3 /test.ogv
 
 */
 // For accept4
@@ -304,16 +304,16 @@ int main(int argc, char** argv) {
 	}
 	
 	video_input_t video_inputs[] = {
-		{ "/dev/video1", 800, 448, NULL, 0 },
+		{ "/dev/video0", 640, 480, NULL, 0 }//,
 		//{ "/dev/video2", 640, 480, NULL, 0 },
-		{ "/dev/video0", 640, 480, NULL, 0 }
+		//{ "/dev/video1", 640, 480, NULL, 0 }
 	};
 	
 	video_view_t *scenes[] = {
 		(video_view_t[]){
 			{ 'l', 0, 'c', 0,     0, -100, 0,     0 },
 			{ 0 }
-		},
+		}/*,
 		(video_view_t[]){
 			{ 'l', 0, 'c', 0,     0, -100, 0,     0 },
 			{ 'r', 0, 'b',16,     1,  -33, 0,     0 },
@@ -322,7 +322,7 @@ int main(int argc, char** argv) {
 		(video_view_t[]){
 			{ 'c', 0, 'c', 0,     1, -100, 0,     0 },
 			{ 0 }
-		}/*,
+		}*//*,
 		(video_view_t[]){
 			{ 'l', 0, 't', 0,     0, -100, 0,     0 },
 			{ 'r', 0, 'b', 0,     1,  -33, 0,     0 },
