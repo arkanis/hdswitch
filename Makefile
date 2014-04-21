@@ -10,15 +10,17 @@ CFLAGS := $(CFLAGS) -g
 #
 # Real applications, object files are created by implicit rules
 #
-hdswitch: LDLIBS = deps/libSDL2.a -ldl -lrt -lm `pkg-config --libs gl` -lasound
+hdswitch: LDLIBS = deps/libSDL2.a -ldl -lrt -lm `pkg-config --libs gl libpulse` -lasound
 hdswitch: deps/libSDL2.a hdswitch.o drawable.o stb_image.o cam.o sound.o ebml_writer.o array.o
 
 hdswitch.o: deps/libSDL2.a
-hdswitch.o: CFLAGS := $(CFLAGS) -Ideps/include `pkg-config --cflags gl` -Wno-multichar -Wno-unused-but-set-variable -Wno-unused-variable
+hdswitch.o: CFLAGS := $(CFLAGS) -Ideps/include `pkg-config --cflags gl libpulse` -Wno-multichar -Wno-unused-but-set-variable -Wno-unused-variable
 
 experiments/v4l2_cam: CFLAGS := $(CFLAGS) -Wno-multichar -Wno-unused-variable -Ideps/include `pkg-config --cflags gl`
 experiments/v4l2_cam: LDLIBS = deps/libSDL2.a -ldl -lrt -lm `pkg-config --libs gl`
 experiments/v4l2_cam: cam.o deps/libSDL2.a drawable.o
+
+experiments/v4l2_list: cam.o
 
 experiments/alsa: LDLIBS = -lasound
 experiments/alsa_rec: LDLIBS = -lasound
@@ -30,6 +32,7 @@ experiments/fbo: deps/libSDL2.a drawable.o stb_image.o
 
 experiments/pulse: CFLAGS := $(CFLAGS) -Wno-unused-parameter
 experiments/pulse: LDLIBS  = -lpulse
+
 
 #
 # Special parameters for some objects files not really under our control

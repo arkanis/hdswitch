@@ -4,6 +4,7 @@
 
 hdswitch
 experiments/v4l2_cam
+experiments/v4l2_list
 experiments/alsa
 experiments/alsa_rec
 experiments/fbo
