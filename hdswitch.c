@@ -6,23 +6,24 @@ ffplay unix:server.sock
 ffmpeg -y -i unix:server.sock -f webm - | ffmpeg2theora --output /dev/stdout --format webm - | oggfwd -p -n event icecast.mi.hdm-stuttgart.de 80 xV2kxUG3 /test.ogv
 
 */
-// For accept4
+
+// For accept4() and open_memstream() (needs _POSIX_C_SOURCE 200809L which is also defined by _GNU_SOURCE)
+// sigemptyset() and co. (need _POSIX_SOURCE)
 #define _GNU_SOURCE
 
-// Required for open_memstream
-#define _POSIX_C_SOURCE 200809L
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdbool.h>
 
 #include <SDL/SDL.h>
-#define GL_GLEXT_PROTOTYPES
-#include <GL/gl.h>
-
+#include <pulse/pulseaudio.h>
 #include <poll.h>
 
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <sys/signalfd.h>
+#include <signal.h>
+#include <unistd.h>
 
 #include "drawable.h"
 #include "stb_image.h"
@@ -31,6 +32,20 @@ ffmpeg -y -i unix:server.sock -f webm - | ffmpeg2theora --output /dev/stdout --f
 #include "timer.h"
 #include "ebml_writer.h"
 #include "array.h"
+
+
+static int signals_init();
+static int signals_cleanup(int signal_fd);
+
+static void signals_cb(pa_mainloop_api *ea, pa_io_event *e, int fd, pa_io_event_flags_t events, void *userdata);
+static void sdl_event_check_cb(pa_mainloop_api *a, pa_time_event *e, const struct timeval *tv, void *userdata);
+static void camera_frame_cb(pa_mainloop_api *ea, pa_io_event *e, int fd, pa_io_event_flags_t events, void *userdata);
+
+// Global stuff used by event callbacks
+size_t scene_count = 0;
+size_t scene_idx = 0;
+size_t ww, wh;
+bool something_to_render = false;
 
 
 typedef struct {
@@ -170,6 +185,7 @@ bool server_start(uint16_t width, uint16_t height) {
 	if (server_fd == -1)
 		return perror("socket"), false;
 	
+	unlink("server.sock");
 	struct sockaddr_un addr = { AF_UNIX, "server.sock" };
 	if ( bind(server_fd, (struct sockaddr*)&addr, sizeof(addr)) == -1 )
 		return perror("bind"), false;
@@ -195,7 +211,7 @@ void server_close() {
 	free(header_ptr);
 }
 
-void server_accept() {
+static void server_accept_cb(pa_mainloop_api *mainloop, pa_io_event *e, int fd, pa_io_event_flags_t events, void *userdata) {
 	int client_fd = accept4(server_fd, NULL, NULL, SOCK_NONBLOCK);
 	if (client_fd == -1) {
 		perror("accept4");
@@ -215,7 +231,6 @@ void server_accept() {
 		perror("write");
 	
 	//write(client_fd, header_ptr, header_size);
-	
 }
 
 void server_write_frame(uint8_t track, uint64_t timecode_ms, void* frame_data, size_t frame_size) {
@@ -304,25 +319,25 @@ int main(int argc, char** argv) {
 	}
 	
 	video_input_t video_inputs[] = {
-		{ "/dev/video0", 640, 480, NULL, 0 }//,
+		{ "/dev/video0", 640, 480, NULL, 0 },
 		//{ "/dev/video2", 640, 480, NULL, 0 },
-		//{ "/dev/video1", 640, 480, NULL, 0 }
+		{ "/dev/video1", 640, 480, NULL, 0 }
 	};
 	
 	video_view_t *scenes[] = {
 		(video_view_t[]){
 			{ 'l', 0, 'c', 0,     0, -100, 0,     0 },
 			{ 0 }
-		}/*,
+		},
 		(video_view_t[]){
 			{ 'l', 0, 'c', 0,     0, -100, 0,     0 },
-			{ 'r', 0, 'b',16,     1,  -33, 0,     0 },
+			{ 'r', 0, 'b', 0,     1,  -33, 0,     0 },
 			{ 0 }
 		},
 		(video_view_t[]){
 			{ 'c', 0, 'c', 0,     1, -100, 0,     0 },
 			{ 0 }
-		}*//*,
+		}/*,
 		(video_view_t[]){
 			{ 'l', 0, 't', 0,     0, -100, 0,     0 },
 			{ 'r', 0, 'b', 0,     1,  -33, 0,     0 },
@@ -336,7 +351,7 @@ int main(int argc, char** argv) {
 	
 	// Calculate rest of the configuration
 	size_t video_input_count = sizeof(video_inputs) / sizeof(video_inputs[0]);
-	size_t scene_count = sizeof(scenes) / sizeof(scenes[0]);
+	scene_count = sizeof(scenes) / sizeof(scenes[0]);
 	
 	// Composite (output video) size
 	size_t composite_w = 0, composite_h = 0;
@@ -374,38 +389,44 @@ int main(int argc, char** argv) {
 	}
 	
 	
+	// Init mainloop
+	pa_mainloop* poll_mainloop = pa_mainloop_new();
+	pa_mainloop_api* mainloop = pa_mainloop_get_api(poll_mainloop);
 	
-	/*
-	//int v1w = 640, v1h = 480;  // video1 raw dimensions, best for HP Webcam HD 5210: 800x448
-	int v1w = 800, v1h = 448;  // video1 raw dimensions, best for HP Webcam HD 5210: 
-	int v2w = 640, v2h = 480;  // video2 raw dimensions
-	int cw  = v1w, ch  = v1h;  // composite video dimensions
-	int ww  = cw,  wh  = ch;   // window dimensions
-	int cv1w = v1w,     cv1h = v1h,     cv1x = 0,         cv1y = 0;          // dimension and position of video1 in composite video
-	int cv2w = v2w / 4, cv2h = v2h / 4, cv2x = cw - cv2w, cv2y = ch - cv2h;  // dimension and position of video2 in composite video
-	*/
+	// Init signal handling
+	int signal_fd = signals_init();
+	mainloop->io_new(mainloop, signal_fd, PA_IO_EVENT_INPUT, signals_cb, NULL);
 	
-	
+	// Init SDL
 	SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER);
 	atexit(SDL_Quit);
 	
-	size_t ww = composite_w, wh = composite_h;
+	ww = composite_w;
+	wh = composite_h;
 	SDL_Window* win = SDL_CreateWindow("HDSwitch", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, ww, wh, SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE);
 	SDL_GLContext gl_ctx = SDL_GL_CreateContext(win);
-	//SDL_GL_SetSwapInterval(1);
 	SDL_GL_SetSwapInterval(0);
+	
+	struct timeval now = { 0 }, interval = {0, 25*1000}, next_sdl_check_time = { 0 };
+	gettimeofday(&now, NULL);
+	timeradd(&now, &interval, &next_sdl_check_time);
+	mainloop->time_new(mainloop, &next_sdl_check_time, sdl_event_check_cb, NULL);
+	
 	
 	// Setup OpenGL stuff
 	check_required_gl_extentions();
 	
+	
+	// Setup videos and textures
 	for(size_t i = 0; i < video_input_count; i++) {
 		video_input_p vi = &video_inputs[i];
 		
 		vi->cam = cam_open(vi->device_file);
 		cam_print_info(vi->cam);
-		cam_setup(vi->cam, __builtin_bswap32('YUYV'), vi->w, vi->h, 30, 1, NULL);
+		cam_setup(vi->cam, cam_pixel_format('YUYV'), vi->w, vi->h, 30, 1, NULL);
 		cam_print_frame_rate(vi->cam);
 		
+		mainloop->io_new(mainloop, vi->cam->fd, PA_IO_EVENT_INPUT, camera_frame_cb, vi);
 		vi->tex = texture_new(vi->w, vi->h, GL_RG8);
 	}
 	
@@ -484,227 +505,25 @@ int main(int argc, char** argv) {
 	}
 	
 	
-	/*
-	video->texture = texture_new(w, h, GL_RG8);
-	
-	// Triangle strip for a basic quad. Quads were removed in OpenGL 3.2.
-	float tri_strip[] = {
-		-1.0, -1.0,     0, h,
-		-1.0,  1.0,     0, 0,
-		 1.0, -1.0,     w, h,
-		 1.0,  1.0,     w, 0
-	};
-	video->vertex_buffer = buffer_new(sizeof(tri_strip), tri_strip);
-	
-	drawable_p video2 = drawable_new(GL_TRIANGLE_STRIP, "shaders/video.vs", "shaders/video.fs");
-	video2->texture = texture_new(w2, h2, GL_RG8);
-	float tri_strip2[] = {
-		0.25, -1.0,        0, h2,
-		0.25, -0.4375,     0,  0,
-		 1.0, -1.0,       w2, h2,
-		 1.0, -0.4375,    w2,  0
-	};
-	video2->vertex_buffer = buffer_new(sizeof(tri_strip2), tri_strip2);
-	*/
-	
 	// Setup sound input and output
-	size_t latency = 5;
 	
-	sound_p in = sound_open(argv[1], SOUND_CAPTURE, SOUND_NONBLOCK);
-	sound_configure(in, 48000, 2, SOUND_FORMAT_S16, true, latency);
 	
-	sound_p out = sound_open("default", SOUND_PLAYBACK, SOUND_NONBLOCK);
-	sound_configure(out, 48000, 2, SOUND_FORMAT_S16, true, latency);
-	
-	size_t buffer_size = in->buffer_size;
-	size_t buffer_filled = 0;
-	void* buffer = malloc(in->buffer_size);
-	
-	// Startup
+	// Init local server
 	server_start(cw, ch);
+	mainloop->io_new(mainloop, server_fd, PA_IO_EVENT_INPUT, server_accept_cb, NULL);
+	
+	
+	// Start everything up
 	for(size_t i = 0; i < video_input_count; i++)
 		cam_stream_start(video_inputs[i].cam, 2);
 	
-	// Prepare mainloop
-	size_t poll_fd_count = 1 + video_input_count + sound_poll_fds_count(in) + sound_poll_fds_count(out);
-	struct pollfd pollfds[poll_fd_count];
 	
-	timeval_t mark;
+	// Do the loop
 	uint32_t start_ms = SDL_GetTicks();
-	size_t overruns = 0, underruns = 0, flushes = 0;
-	bool exit_mainloop = false;
-	size_t scene_idx = 0;
-	while (!exit_mainloop) {
-		
-		// Handle SLD events
-		time_mark(&mark);
-			SDL_Event event;
-			while ( SDL_PollEvent(&event) ) {
-				if (event.type == SDL_QUIT) {
-					exit_mainloop = true;
-					break;
-				}
-				
-				if (event.type == SDL_WINDOWEVENT && event.window.event == SDL_WINDOWEVENT_RESIZED) {
-					ww = event.window.data1;
-					wh = event.window.data2;
-				}
-				
-				if (event.type == SDL_KEYDOWN && event.key.keysym.sym >= SDLK_1 && event.key.keysym.sym <= SDLK_9) {
-					size_t num = event.key.keysym.sym - SDLK_1;
-					if (num < scene_count) {
-						printf("switching to scene %zu\n", num);
-						scene_idx = num;
-					}
-				}
-				/*
-				if (event.type == SDL_KEYDOWN) {
-					switch (event.key.keysym.sym) {
-						case SDLK_1:
-							set_controls(cam, (cam_control_t[]){ (cam_control_t){ "Zoom, Absolute", "0" }, (cam_control_t){ NULL } } );
-							cam_print_info(cam);
-							break;
-						case SDLK_2:
-							set_controls(cam, (cam_control_t[]){ (cam_control_t){ "Zoom, Absolute", "2" }, (cam_control_t){ NULL } } );
-							cam_print_info(cam);
-							break;
-						case SDLK_3:
-							set_controls(cam, (cam_control_t[]){ (cam_control_t){ "Zoom, Absolute", "3" }, (cam_control_t){ NULL } } );
-							cam_print_info(cam);
-							break;
-						case SDLK_4:
-							set_controls(cam, (cam_control_t[]){ (cam_control_t){ "Zoom, Absolute", "4" }, (cam_control_t){ NULL } } );
-							cam_print_info(cam);
-							break;
-						case SDLK_5:
-							set_controls(cam, (cam_control_t[]){ (cam_control_t){ "Zoom, Absolute", "5" }, (cam_control_t){ NULL } } );
-							cam_print_info(cam);
-							break;
-						case SDLK_6:
-							set_controls(cam, (cam_control_t[]){ (cam_control_t){ "Zoom, Absolute", "6" }, (cam_control_t){ NULL } } );
-							cam_print_info(cam);
-							break;
-						case SDLK_7:
-							set_controls(cam, (cam_control_t[]){ (cam_control_t){ "Zoom, Absolute", "7" }, (cam_control_t){ NULL } } );
-							cam_print_info(cam);
-							break;
-						case SDLK_8:
-							set_controls(cam, (cam_control_t[]){ (cam_control_t){ "Zoom, Absolute", "8" }, (cam_control_t){ NULL } } );
-							cam_print_info(cam);
-							break;
-						case SDLK_9:
-							set_controls(cam, (cam_control_t[]){ (cam_control_t){ "Zoom, Absolute", "9" }, (cam_control_t){ NULL } } );
-							cam_print_info(cam);
-							break;
-						case SDLK_0:
-							set_controls(cam, (cam_control_t[]){ (cam_control_t){ "Zoom, Absolute", "10" }, (cam_control_t){ NULL } } );
-							cam_print_info(cam);
-							break;
-					}
-				}
-				*/
-			}
-		double sdl_time = time_mark(&mark);
-		
-		// Setup and do the poll
-		time_mark(&mark);
-			size_t poll_fds_used = 0;
-			
-			pollfds[0] = (struct pollfd){ .fd = server_fd, .events = POLLIN, .revents = 0 };
-			poll_fds_used++;
-			
-			for(size_t i = 0; i < video_input_count; i++) {
-				video_input_p vi = &video_inputs[i];
-				pollfds[1 + i] = (struct pollfd){ .fd = vi->cam->fd, .events = POLLIN, .revents = 0 };
-				poll_fds_used++;
-			}
-			
-			struct pollfd* in_poll_fds = pollfds + poll_fds_used;
-			size_t in_poll_fd_count = sound_poll_fds(in,  pollfds + poll_fds_used, poll_fd_count - poll_fds_used);
-			poll_fds_used += in_poll_fd_count;
-			
-			struct pollfd* out_poll_fds = pollfds + poll_fds_used;
-			size_t out_poll_fd_count = sound_poll_fds(out, pollfds + poll_fds_used, poll_fd_count - poll_fds_used);
-			poll_fds_used += out_poll_fd_count;
-			
-			int active_fds = poll(pollfds, poll_fds_used, -1);
-			if (active_fds == -1) {
-				perror("poll");
-				continue;
-			}
-		double poll_time = time_mark(&mark);
-		
-		
-		double read_time = 0, write_time = 0;
-		double cam_time = 0, tex_update_time = 0, draw_time = 0, swap_time = 0;
-		ssize_t bytes_read = 0, bytes_written = 0;
-		
-		// Read and write pending audio data
-		uint16_t in_revents  = sound_poll_fds_revents(in,  in_poll_fds,  in_poll_fd_count);
-		uint16_t out_revents = sound_poll_fds_revents(out, out_poll_fds, out_poll_fd_count);
-		
-		if (in_revents & POLLIN) {
-			mark = time_now();
-			
-			while( (bytes_read = sound_read(in, buffer + buffer_filled, buffer_size - buffer_filled)) < 0 ) {
-				sound_recover(in, bytes_read);
-				overruns++;
-			}
-			server_write_frame(2, SDL_GetTicks() - start_ms, buffer + buffer_filled, bytes_read);
-			buffer_filled += bytes_read;
-			
-			read_time = time_mark(&mark);
-		}
-		
-		if (out_revents & POLLOUT) {
-			mark = time_now();
-			
-			while( (bytes_written = sound_write(out, buffer, buffer_filled)) < 0 ) {
-				sound_recover(out, bytes_written);
-				underruns++;
-			}
-			
-			if (bytes_written < (ssize_t)buffer_filled) {
-				// Samples still left in buffer, move to front of buffer.
-				memmove(buffer, buffer + bytes_written, buffer_filled - bytes_written);
-				buffer_filled = buffer_filled - bytes_written;
-			} else {
-				buffer_filled = 0;
-			}
-			
-			write_time = time_mark(&mark);
-		}
-		
-		// Flush the buffer if underruns cause the sample to queue up and create latency.
-		if (buffer_filled > buffer_size / 2) {
-			buffer_filled = 0;
-			flushes++;
-		}
-		
-		// Upload new video frames to the GPU
-		bool something_to_render = false;
-		for(size_t i = 0; i < video_input_count; i++) {
-			video_input_p vi = &video_inputs[i];
-			
-			if (pollfds[1 + i].revents & POLLIN) {
-				mark = time_now();
-				
-				cam_buffer_t frame = cam_frame_get(vi->cam);
-				cam_time += time_mark(&mark);
-				
-				texture_update(vi->tex, GL_RG, frame.ptr);
-				tex_update_time += time_mark(&mark);
-				
-				cam_frame_release(vi->cam);
-				
-				something_to_render = true;
-			}
-		}
-		
-		// Render new video frames
+	while ( pa_mainloop_iterate(poll_mainloop, true, NULL) >= 0 ) {
+		// Render new video frames if one or more frames have been uploaded
 		if (something_to_render) {
 			video_view_p scene = scenes[scene_idx];
-			mark = time_now();
 			
 			fbo_bind(composite_video);
 				glClearColor(0, 0, 0, 0);
@@ -730,17 +549,11 @@ int main(int argc, char** argv) {
 			glViewport(0, 0, ww, wh);
 			
 			drawable_draw(gui);
-			draw_time = time_mark(&mark);
 			
 			SDL_GL_SwapWindow(win);
-			swap_time = time_mark(&mark);
 		}
-		
-		// Accept new clients
-		if (pollfds[0].revents & POLLIN)
-			server_accept();
-		
-		
+	}
+
 		// Output stats
 		/*
 		printf("poll: %zu fds, %d active, %4.1lf ms  ", poll_fds_used, active_fds, poll_time);
@@ -756,10 +569,8 @@ int main(int argc, char** argv) {
 		
 		//printf("poll: %.1lf ms (%.1lf fps), cam: %.1lf ms, tex update: %.1lf ms, draw: %.1lf ms, swap: %.1lf\n",
 		//	poll_time, 1000.0 / poll_time, frame_time, tex_update_time, draw_time, swap_time);
-	}
 	
-	sound_close(in);
-	sound_close(out);
+	server_close();
 	
 	for(size_t i = 0; i < video_input_count; i++) {
 		video_input_p vi = &video_inputs[i];
@@ -777,8 +588,6 @@ int main(int argc, char** argv) {
 		}
 	}
 	
-	server_close();
-	
 	drawable_destroy(stream);
 	drawable_destroy(gui);
 	drawable_destroy(video_on_composite);
@@ -791,5 +600,110 @@ int main(int argc, char** argv) {
 	SDL_GL_DeleteContext(gl_ctx);
 	SDL_DestroyWindow(win);
 	
+	pa_mainloop_free(poll_mainloop);
+	signals_cleanup(signal_fd);
+	
 	return 0;
+}
+
+
+
+//
+// Signal handling
+//
+
+static int signals_init() {
+	// Setup SIGINT and SIGTERM to terminate our poll loop. For that we read them via a signal fd.
+	// To prevent the signals from interrupting our process we need to block them first.
+	sigset_t signal_mask;
+	sigemptyset(&signal_mask);
+	sigaddset(&signal_mask, SIGINT);
+	sigaddset(&signal_mask, SIGTERM);
+	
+	if ( sigprocmask(SIG_BLOCK, &signal_mask, NULL) == -1 )
+		return perror("sigprocmask"), -1;
+	
+	int signals = signalfd(-1, &signal_mask, SFD_NONBLOCK | SFD_CLOEXEC);
+	if (signals == -1) {
+		perror("signalfd");
+		
+		if ( sigprocmask(SIG_UNBLOCK, &signal_mask, NULL) == -1 )
+			perror("sigprocmask");
+		
+		return -1;
+	}
+	
+	return signals;
+}
+
+static int signals_cleanup(int signal_fd) {
+	close(signal_fd);
+	
+	sigset_t signal_mask;
+	sigemptyset(&signal_mask);
+	sigaddset(&signal_mask, SIGINT);
+	sigaddset(&signal_mask, SIGTERM);
+	if ( sigprocmask(SIG_UNBLOCK, &signal_mask, NULL) == -1 )
+		return perror("sigprocmask"), -1;
+	
+	return 1;
+}
+
+
+
+//
+// Event handling callbacks.
+//
+
+// Called when a signal is received
+static void signals_cb(pa_mainloop_api *mainloop, pa_io_event *e, int fd, pa_io_event_flags_t events, void *userdata) {
+	struct signalfd_siginfo siginfo = {0};
+	
+	if ( read(fd, &siginfo, sizeof(siginfo)) == -1 ) {
+		perror("read(signalfd)");
+		return;
+	}
+	
+	mainloop->quit(mainloop, 0);
+}
+
+// Called periodically to handle pending SDL events
+static void sdl_event_check_cb(pa_mainloop_api *mainloop, pa_time_event *e, const struct timeval *tv, void *userdata) {
+	SDL_Event event;
+	while ( SDL_PollEvent(&event) ) {
+		if (event.type == SDL_QUIT) {
+			mainloop->quit(mainloop, 0);
+			break;
+		}
+		
+		if (event.type == SDL_WINDOWEVENT && event.window.event == SDL_WINDOWEVENT_RESIZED) {
+			ww = event.window.data1;
+			wh = event.window.data2;
+		}
+		
+		if (event.type == SDL_KEYDOWN && event.key.keysym.sym >= SDLK_1 && event.key.keysym.sym <= SDLK_9) {
+			size_t num = event.key.keysym.sym - SDLK_1;
+			if (num < scene_count) {
+				printf("switching to scene %zu\n", num);
+				scene_idx = num;
+			}
+		}
+	}
+	
+	// Restart the timer for the next time
+	struct timeval now = { 0 }, interval = {0, 25*1000}, next_sdl_check_time = { 0 };
+	gettimeofday(&now, NULL);
+	timeradd(&now, &interval, &next_sdl_check_time);
+	mainloop->time_restart(e, &next_sdl_check_time);
+}
+
+// Upload new video frames to the GPU
+static void camera_frame_cb(pa_mainloop_api *mainloop, pa_io_event *e, int fd, pa_io_event_flags_t events, void *userdata) {
+	video_input_p video_input = userdata;
+	
+	cam_buffer_t frame = cam_frame_get(video_input->cam);
+		texture_update(video_input->tex, GL_RG, frame.ptr);
+	cam_frame_release(video_input->cam);
+	
+	something_to_render = true;
 }
