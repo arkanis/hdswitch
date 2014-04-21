@@ -1,5 +1,7 @@
 CC     = gcc
-CFLAGS = -std=c99 -Werror -Wall -Wextra
+CFLAGS = -std=c99 -Werror -Wall -Wextra -Wno-unused-parameter
+# The Pulse Audio callbacks require a full signature but not all parameters
+# are used all the time. Therefore disable the unused-parameter warning.
 
 CFLAGS := $(CFLAGS) -g
 #CFLAGS := $(CFLAGS) -Ofast -mtune=native -march=native
