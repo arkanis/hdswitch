@@ -1,3 +1,10 @@
+/*
+
+command to listen to raw audio log:
+pacat --rate 48000 audio.raw
+
+*/
+
 // for strdup
 #define _BSD_SOURCE
 #define _POSIX_SOURCE
@@ -53,14 +60,16 @@ size_t   mixer_buffer_size = 0;
 uint64_t mixer_pts = 0;
 
 struct timeval global_start;
+FILE* audio_log = NULL;
 
 
 int main() {
+	audio_log = fopen("audio.raw", "wb");
 	int signal_fd = signals_init();
 	
 	mixer_buffer_size = pa_usec_to_bytes(mixer_buffer_time_ms * PA_USEC_PER_MSEC, &mixer_sample_spec);
 	mixer_buffer_ptr = malloc(mixer_buffer_size);
-	memset(mixer_buffer_ptr, 0, mixer_buffer_size);
+	memset(mixer_buffer_ptr, 0xff, mixer_buffer_size);
 	
 	pa_mainloop* pa_ml = pa_mainloop_new();
 	pa_mainloop_api* pa_api = pa_mainloop_get_api(pa_ml);
@@ -78,6 +87,7 @@ int main() {
 	free(mixer_buffer_ptr);
 	pa_context_disconnect(context);
 	signals_cleanup(signal_fd);
+	fclose(audio_log);
 	
 	return 0;
 }
@@ -285,16 +295,18 @@ static void stream_read_cb(pa_stream *s, size_t length, void *userdata) {
 		size_t in_sample_count = in_buffer_size / sizeof(in_samples_ptr[0]);
 		int16_t* mixer_samples_ptr = mixer_buffer_ptr + stream_data->bytes_in_mixer_buffer;
 		
+		//fwrite(mixer_samples_ptr, in_buffer_size, 1, audio_log);
 		for(size_t i = 0; i < in_sample_count; i++) {
 			//mixer_samples_ptr[i] = in_samples_ptr[i];
 			
 			int16_t a = mixer_samples_ptr[i], b = in_samples_ptr[i];
-			if (a < 0 && b < 0)
+			if (a < 0 && b < 0) {
 				mixer_samples_ptr[i] = (a + b) - (a * b) / INT16_MIN;
-			else if (a > 0 && b > 0)
+			} else if (a > 0 && b > 0) {
 				mixer_samples_ptr[i] = (a + b) - (a * b) / INT16_MAX;
-			else
+			} else {
 				mixer_samples_ptr[i] = a + b;
+			}
 		}
 		stream_data->bytes_in_mixer_buffer += in_buffer_size;
 		
@@ -322,12 +334,14 @@ static void stream_read_cb(pa_stream *s, size_t length, void *userdata) {
 	
 	if (min_bytes_in_mixer > 0) {
 		pa_stream_write(out_stream, mixer_buffer_ptr, min_bytes_in_mixer, NULL, 0, PA_SEEK_RELATIVE);
+		fwrite(mixer_buffer_ptr, min_bytes_in_mixer, 1, audio_log);
 		
 		size_t incomplete_mixer_bytes = max_bytes_in_mixer - min_bytes_in_mixer;
 		if (incomplete_mixer_bytes > 0) {
 			memmove(mixer_buffer_ptr, mixer_buffer_ptr + min_bytes_in_mixer, incomplete_mixer_bytes);
-			memset(mixer_buffer_ptr + incomplete_mixer_bytes, 0, max_bytes_in_mixer - incomplete_mixer_bytes);
 		}
+		// Always clear the buffer space written out, even if no bytes are incomplete
+		memset(mixer_buffer_ptr + incomplete_mixer_bytes, 0, max_bytes_in_mixer - incomplete_mixer_bytes);
 		
 		for(stream_p s = streams; s != NULL; s = s->next) {
 			// Ignore streams that have not yet received any data
