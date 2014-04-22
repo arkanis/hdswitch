@@ -395,7 +395,6 @@ int main(int argc, char** argv) {
 	
 	// Init signal handling
 	int signal_fd = signals_init();
-	mainloop->io_new(mainloop, signal_fd, PA_IO_EVENT_INPUT, signals_cb, NULL);
 	
 	// Init SDL
 	SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER);
@@ -406,11 +405,6 @@ int main(int argc, char** argv) {
 	SDL_Window* win = SDL_CreateWindow("HDSwitch", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, ww, wh, SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE);
 	SDL_GLContext gl_ctx = SDL_GL_CreateContext(win);
 	SDL_GL_SetSwapInterval(0);
-	
-	struct timeval now = { 0 }, interval = {0, 25*1000}, next_sdl_check_time = { 0 };
-	gettimeofday(&now, NULL);
-	timeradd(&now, &interval, &next_sdl_check_time);
-	mainloop->time_new(mainloop, &next_sdl_check_time, sdl_event_check_cb, NULL);
 	
 	
 	// Setup OpenGL stuff
@@ -426,7 +420,6 @@ int main(int argc, char** argv) {
 		cam_setup(vi->cam, cam_pixel_format('YUYV'), vi->w, vi->h, 30, 1, NULL);
 		cam_print_frame_rate(vi->cam);
 		
-		mainloop->io_new(mainloop, vi->cam->fd, PA_IO_EVENT_INPUT, camera_frame_cb, vi);
 		vi->tex = texture_new(vi->w, vi->h, GL_RG8);
 	}
 	
@@ -510,13 +503,27 @@ int main(int argc, char** argv) {
 	
 	// Init local server
 	server_start(cw, ch);
-	mainloop->io_new(mainloop, server_fd, PA_IO_EVENT_INPUT, server_accept_cb, NULL);
 	
 	
 	// Start everything up
 	for(size_t i = 0; i < video_input_count; i++)
 		cam_stream_start(video_inputs[i].cam, 2);
 	
+	
+	// Prepare mainloop event callbacks
+	mainloop->io_new(mainloop, signal_fd, PA_IO_EVENT_INPUT, signals_cb, NULL);
+	
+	struct timeval now = { 0 }, interval = {0, 25*1000}, next_sdl_check_time = { 0 };
+	gettimeofday(&now, NULL);
+	timeradd(&now, &interval, &next_sdl_check_time);
+	mainloop->time_new(mainloop, &next_sdl_check_time, sdl_event_check_cb, NULL);
+	
+	for(size_t i = 0; i < video_input_count; i++) {
+		video_input_p vi = &video_inputs[i];
+		mainloop->io_new(mainloop, vi->cam->fd, PA_IO_EVENT_INPUT, camera_frame_cb, vi);
+	}
+
+	mainloop->io_new(mainloop, server_fd, PA_IO_EVENT_INPUT, server_accept_cb, NULL);
 	
 	// Do the loop
 	uint32_t start_ms = SDL_GetTicks();
