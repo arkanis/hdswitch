@@ -28,10 +28,14 @@ ffmpeg -y -i unix:server.sock -f webm - | ffmpeg2theora --output /dev/stdout --f
 #include "drawable.h"
 #include "stb_image.h"
 #include "cam.h"
-#include "sound.h"
 #include "timer.h"
 #include "ebml_writer.h"
 #include "array.h"
+
+
+// Config variables
+const uint32_t latency_ms = 10;
+const uint32_t mixer_buffer_time_ms = 1000;
 
 
 static int signals_init();
@@ -40,13 +44,344 @@ static int signals_cleanup(int signal_fd);
 static void signals_cb(pa_mainloop_api *ea, pa_io_event *e, int fd, pa_io_event_flags_t events, void *userdata);
 static void sdl_event_check_cb(pa_mainloop_api *a, pa_time_event *e, const struct timeval *tv, void *userdata);
 static void camera_frame_cb(pa_mainloop_api *ea, pa_io_event *e, int fd, pa_io_event_flags_t events, void *userdata);
+void server_write_frame(uint8_t track, uint64_t timecode_ms, void* frame_data, size_t frame_size);
 
 // Global stuff used by event callbacks
 size_t scene_count = 0;
 size_t scene_idx = 0;
 size_t ww, wh;
 bool something_to_render = false;
+uint32_t start_ms = 0;
 
+
+//
+// Mixer stuff
+//
+
+typedef struct mic_s mic_t, *mic_p;
+struct mic_s {
+	ssize_t bytes_in_mixer_buffer;
+	pa_stream* stream;
+	char* name;
+	struct timeval start;
+	mic_p next;
+};
+mic_p mics = NULL;
+pa_stream* audio_playback_stream = NULL;
+
+
+pa_sample_spec mixer_sample_spec = {
+	.format   = PA_SAMPLE_S16LE,
+	.rate     = 48000,
+	.channels = 2
+};
+
+void*    mixer_buffer_ptr = NULL;
+size_t   mixer_buffer_size = 0;
+uint64_t mixer_pts = 0;
+
+struct timeval mixer_global_start;
+pa_context* context = NULL;
+uint16_t log_countdown = 0;
+
+static void mixer_on_context_state_changed(pa_context *c, void *userdata);
+static void source_info_list_cb(pa_context *c, const pa_source_info *i, int eol, void *userdata);
+static void mixer_on_new_mic_data(pa_stream *s, size_t length, void *userdata);
+
+void mixer_init(pa_mainloop_api* mainloop) {
+	mixer_buffer_size = pa_usec_to_bytes(mixer_buffer_time_ms * PA_USEC_PER_MSEC, &mixer_sample_spec);
+	mixer_buffer_ptr = malloc(mixer_buffer_size);
+	memset(mixer_buffer_ptr, 0, mixer_buffer_size);
+	
+	context = pa_context_new(mainloop, "HDswitch");
+	pa_context_set_state_callback(context, mixer_on_context_state_changed, NULL);
+	pa_context_connect(context, NULL, 0, NULL);
+}
+
+void mixer_cleanup() {
+	free(mixer_buffer_ptr);
+	pa_context_disconnect(context);
+}
+
+static void mixer_on_context_state_changed(pa_context *c, void *userdata) {
+	switch (pa_context_get_state(c)) {
+		case PA_CONTEXT_UNCONNECTED:  printf("PA_CONTEXT_UNCONNECTED\n");  break;
+		case PA_CONTEXT_CONNECTING:   printf("PA_CONTEXT_CONNECTING\n");   break;
+		case PA_CONTEXT_AUTHORIZING:  printf("PA_CONTEXT_AUTHORIZING\n");  break;
+		case PA_CONTEXT_SETTING_NAME: printf("PA_CONTEXT_SETTING_NAME\n"); break;
+		case PA_CONTEXT_READY:        printf("PA_CONTEXT_READY\n");
+			{
+				gettimeofday(&mixer_global_start, NULL);
+				pa_operation* op = pa_context_get_source_info_list(c, source_info_list_cb, NULL);
+				pa_operation_unref(op);
+			}
+			break;
+		case PA_CONTEXT_FAILED:       printf("PA_CONTEXT_FAILED\n");     break;
+		case PA_CONTEXT_TERMINATED:   printf("PA_CONTEXT_TERMINATED\n"); break;
+		//default: break;
+	}
+}
+
+
+static void source_info_list_cb(pa_context *c, const pa_source_info *i, int eol, void *userdata) {
+	// Source list finished, create the playback stream
+	if (i == NULL) {
+		return;
+	}
+	
+	// Ignore all monitor streams, we only want real mics
+	if ( !(i->flags & PA_SOURCE_HARDWARE) )
+		return;
+	
+	printf("name: %s\n", i->name);
+	printf("  index: %u\n", i->index);
+	printf("  description: %s\n", i->description);
+	printf("  driver: %s\n", i->driver);
+	printf("  latency: %.1f ms, configured: %.1f ms\n", i->latency / 1000.0, i->configured_latency / 1000.0);
+	
+	char buffer[512] = { 0 };
+	pa_sample_spec_snprint(buffer, sizeof(buffer), &i->sample_spec);
+	printf("  sample_spec: %s\n", buffer);
+	
+	pa_channel_map_snprint(buffer, sizeof(buffer), &i->channel_map);
+	printf("  channel_map: %s\n", buffer);
+	
+	printf("  flags:\n");
+	if (i->flags & PA_SOURCE_HW_VOLUME_CTRL)  printf("  - PA_SOURCE_HW_VOLUME_CTRL\n");
+	if (i->flags & PA_SOURCE_LATENCY)         printf("  - PA_SOURCE_LATENCY\n");
+	if (i->flags & PA_SOURCE_HARDWARE)        printf("  - PA_SOURCE_HARDWARE\n");
+	if (i->flags & PA_SOURCE_NETWORK)         printf("  - PA_SOURCE_NETWORK\n");
+	if (i->flags & PA_SOURCE_HW_MUTE_CTRL)    printf("  - PA_SOURCE_HW_MUTE_CTRL\n");
+	if (i->flags & PA_SOURCE_DECIBEL_VOLUME)  printf("  - PA_SOURCE_DECIBEL_VOLUME\n");
+	if (i->flags & PA_SOURCE_DYNAMIC_LATENCY) printf("  - PA_SOURCE_DYNAMIC_LATENCY\n");
+	if (i->flags & PA_SOURCE_FLAT_VOLUME)     printf("  - PA_SOURCE_FLAT_VOLUME\n");
+	
+	printf("  properties:\n");
+	const char* key = NULL;
+	void* it = NULL;
+	while ( (key = pa_proplist_iterate(i->proplist, &it)) != NULL ) {
+		printf("  - %s: %s\n", key, pa_proplist_gets(i->proplist, key));
+	}
+	
+	mic_p mic = malloc(sizeof(mic_t));
+	mic->bytes_in_mixer_buffer = -1;
+	mic->next = mics;
+	mic->stream = pa_stream_new(c, "HDswitch", &mixer_sample_spec, NULL);
+	mic->name = strdup(i->description);
+	mics = mic;
+	
+	pa_stream_set_read_callback(mic->stream, mixer_on_new_mic_data, mic);
+	
+	pa_buffer_attr buffer_attr = { 0 };
+	buffer_attr.maxlength = (uint32_t) -1;
+	buffer_attr.prebuf = (uint32_t) -1;
+	buffer_attr.fragsize = pa_usec_to_bytes(latency_ms * PA_USEC_PER_MSEC, &mixer_sample_spec);
+	buffer_attr.tlength = (uint32_t) -1;
+	buffer_attr.minreq = (uint32_t) -1;
+	
+	if ( pa_stream_connect_record(mic->stream, i->name, &buffer_attr, PA_STREAM_ADJUST_LATENCY | PA_STREAM_INTERPOLATE_TIMING | PA_STREAM_AUTO_TIMING_UPDATE) < 0 ) {
+		printf("pa_stream_connect_record() failed: %s", pa_strerror(pa_context_errno(c)));
+	}
+}
+
+
+static void mixer_on_new_mic_data(pa_stream *s, size_t length, void *userdata) {
+	const void *in_buffer_ptr;
+	size_t in_buffer_size;
+	mic_p stream_data = userdata;
+	/*
+	if (stream_data->bytes_in_mixer_buffer == -1) {
+		stream_data->bytes_in_mixer_buffer = 0;
+		
+		if (audio_playback_stream == NULL) {
+			audio_playback_stream = pa_stream_new(context, "HDswitch", &mixer_sample_spec, NULL);
+			
+			pa_buffer_attr buffer_attr = { 0 };
+			buffer_attr.maxlength = (uint32_t) -1;
+			buffer_attr.prebuf = (uint32_t) -1;
+			buffer_attr.fragsize = (uint32_t) -1;
+			buffer_attr.tlength = pa_usec_to_bytes(latency_ms * PA_USEC_PER_MSEC, &mixer_sample_spec);
+			buffer_attr.minreq = (uint32_t) -1;
+			
+			pa_stream_connect_playback(audio_playback_stream, NULL, &buffer_attr, PA_STREAM_ADJUST_LATENCY, NULL, NULL);
+			
+			char buffer[512] = { 0 };
+			pa_sample_spec_snprint(buffer, sizeof(buffer), pa_stream_get_sample_spec(audio_playback_stream));
+			printf("audio_playback_stream sample_spec: %s\n", buffer);
+		}
+	}
+	*/
+	// Initialize the byte offset only as soon as we got the first data packet.
+	// Otherwise always waits for this stream from it's start to the arival of the first packet.
+	if (stream_data->bytes_in_mixer_buffer == -1) {
+		stream_data->bytes_in_mixer_buffer = -2;
+		
+		if (audio_playback_stream == NULL) {
+			audio_playback_stream = pa_stream_new(context, "HDswitch", &mixer_sample_spec, NULL);
+			
+			pa_buffer_attr buffer_attr = { 0 };
+			buffer_attr.maxlength = (uint32_t) -1;
+			buffer_attr.prebuf = (uint32_t) -1;
+			buffer_attr.fragsize = (uint32_t) -1;
+			buffer_attr.tlength = pa_usec_to_bytes(latency_ms * PA_USEC_PER_MSEC, &mixer_sample_spec);
+			buffer_attr.minreq = (uint32_t) -1;
+			
+			pa_stream_connect_playback(audio_playback_stream, NULL, &buffer_attr, PA_STREAM_ADJUST_LATENCY, NULL, NULL);
+			
+			char buffer[512] = { 0 };
+			pa_sample_spec_snprint(buffer, sizeof(buffer), pa_stream_get_sample_spec(audio_playback_stream));
+			printf("audio_playback_stream sample_spec: %s\n", buffer);
+		}
+		
+		gettimeofday(&stream_data->start, NULL);
+		struct timeval start_delay;
+		timersub(&stream_data->start, &mixer_global_start, &start_delay);
+		printf("[%p] start after %.2lf ms, initial data: %zu bytes, %.2lf ms\n",
+			s, start_delay.tv_sec * 1000.0 + start_delay.tv_usec / 1000.0,
+			length, pa_bytes_to_usec(length, &mixer_sample_spec) / 1000.0);
+		
+		pa_usec_t latency = 0;
+		int negative = 0;
+		int result = pa_stream_get_latency(s, &latency, &negative);
+		if (result == -PA_ERR_NODATA) {
+			printf("  no stream latency data yet!\n");
+		} else {
+			printf("  stream latency: %.2lf ms\n", latency / 1000.0);
+			//if (latency > 20*1000)
+			//	pa_stream_flush(s, NULL, NULL);
+		}
+		
+		char buffer[512] = { 0 };
+		pa_sample_spec_snprint(buffer, sizeof(buffer), pa_stream_get_sample_spec(s));
+		printf("  sample_spec: %s\n", buffer);
+
+		
+		pa_operation* op = pa_stream_flush(s, NULL, NULL);
+		pa_operation_unref(op);
+		return;
+	} else if (stream_data->bytes_in_mixer_buffer == -2) {
+		stream_data->bytes_in_mixer_buffer = 0;
+		
+		gettimeofday(&stream_data->start, NULL);
+		struct timeval start_delay;
+		timersub(&stream_data->start, &mixer_global_start, &start_delay);
+		printf("[%p] first packet after flush, after %.2lf ms, data: %zu bytes, %.2lf ms\n",
+			s, start_delay.tv_sec * 1000.0 + start_delay.tv_usec / 1000.0,
+			length, pa_bytes_to_usec(length, &mixer_sample_spec) / 1000.0);
+		
+		pa_usec_t latency = 0;
+		int negative = 0;
+		int result = pa_stream_get_latency(s, &latency, &negative);
+		if (result == -PA_ERR_NODATA) {
+			printf("no stream latency data yet!\n");
+		} else {
+			printf("stream latency: %.2lf ms\n", latency / 1000.0);
+			//if (latency > 20*1000)
+			//	pa_stream_flush(s, NULL, NULL);
+		}
+		
+		return;
+	}
+	
+	//log_countdown = (log_countdown + 1) % 100;
+	log_countdown = 1;
+	if (!log_countdown) printf("mixer_on_new_mic_data, stream %p, %6zu bytes, %.2lf ms\n",
+		s, length, pa_bytes_to_usec(length, &mixer_sample_spec) / 1000.0);
+	
+	while (pa_stream_readable_size(s) > 0) {
+		// peek actually creates and fills the data vbl
+		if (pa_stream_peek(s, &in_buffer_ptr, &in_buffer_size) < 0) {
+			fprintf(stderr, "  Read failed\n");
+			return;
+		}
+		
+		if (in_buffer_ptr == NULL && in_buffer_size) {
+			printf("  buffer is empty! no idea what to do.\n");
+			continue;
+		}
+		
+		if (in_buffer_ptr == NULL && in_buffer_size > 0) {
+			printf("  hole of %zu bytes! don't add to mixer buffer.\n", in_buffer_size);
+			stream_data->bytes_in_mixer_buffer += in_buffer_size;
+			continue;
+		}
+		
+		if (stream_data->bytes_in_mixer_buffer + in_buffer_size > mixer_buffer_size) {
+			printf("  mixer buffer overflow from %s, droping audio packet\n", stream_data->name);
+			pa_stream_drop(s);
+			continue;
+		}
+		
+		//printf("  %zu bytes\n", in_buffer_size);
+		//pa_stream_write(audio_playback_stream, in_buffer_ptr, in_buffer_size, NULL, 0, PA_SEEK_RELATIVE);
+		
+		// Mix new sample into the mixer buffer
+		const int16_t* in_samples_ptr = in_buffer_ptr;
+		size_t in_sample_count = in_buffer_size / sizeof(in_samples_ptr[0]);
+		int16_t* mixer_samples_ptr = mixer_buffer_ptr + stream_data->bytes_in_mixer_buffer;
+		
+		for(size_t i = 0; i < in_sample_count; i++) {
+			//mixer_samples_ptr[i] = in_samples_ptr[i];
+			
+			int16_t a = mixer_samples_ptr[i], b = in_samples_ptr[i];
+			if (a < 0 && b < 0)
+				mixer_samples_ptr[i] = (a + b) - (a * b) / INT16_MIN;
+			else if (a > 0 && b > 0)
+				mixer_samples_ptr[i] = (a + b) - (a * b) / INT16_MAX;
+			else
+				mixer_samples_ptr[i] = a + b;
+		}
+		stream_data->bytes_in_mixer_buffer += in_buffer_size;
+		
+		// swallow the data peeked at before
+		pa_stream_drop(s);
+	}
+	
+	// Check if a part of the mixer buffer has been written to by all streams. In that case
+	// this part contains data from all streams and can be written out.
+	if (!log_countdown) printf("  mixer bytes: ");
+	ssize_t min_bytes_in_mixer = INT32_MAX, max_bytes_in_mixer = 0;
+	for(mic_p s = mics; s != NULL; s = s->next) {
+		if (!log_countdown) printf("%4zd ", s->bytes_in_mixer_buffer);
+		
+		// Ignore streams that have not yet received any data
+		if (s->bytes_in_mixer_buffer < 0)
+			continue;
+		
+		if (s->bytes_in_mixer_buffer < min_bytes_in_mixer)
+			min_bytes_in_mixer = s->bytes_in_mixer_buffer;
+		if (s->bytes_in_mixer_buffer > max_bytes_in_mixer)
+			max_bytes_in_mixer = s->bytes_in_mixer_buffer;
+	}
+	if (!log_countdown) printf("lag: %4zu bytes, %5.1f ms\n", max_bytes_in_mixer - min_bytes_in_mixer, pa_bytes_to_usec(max_bytes_in_mixer - min_bytes_in_mixer, &mixer_sample_spec) / 1000.0);
+	
+	if (min_bytes_in_mixer > 0) {
+		pa_stream_write(audio_playback_stream, mixer_buffer_ptr, min_bytes_in_mixer, NULL, 0, PA_SEEK_RELATIVE);
+		uint64_t audio_timecode = SDL_GetTicks() - start_ms - pa_bytes_to_usec(min_bytes_in_mixer, &mixer_sample_spec) / 1000;
+		server_write_frame(2, audio_timecode, mixer_buffer_ptr, min_bytes_in_mixer);
+		
+		size_t incomplete_mixer_bytes = max_bytes_in_mixer - min_bytes_in_mixer;
+		if (incomplete_mixer_bytes > 0) {
+			memmove(mixer_buffer_ptr, mixer_buffer_ptr + min_bytes_in_mixer, incomplete_mixer_bytes);
+		}
+		// Always clear the buffer space written out, even if no bytes are incomplete
+		memset(mixer_buffer_ptr + incomplete_mixer_bytes, 0, max_bytes_in_mixer - incomplete_mixer_bytes);
+		
+		for(mic_p s = mics; s != NULL; s = s->next) {
+			// Ignore streams that have not yet received any data
+			if (s->bytes_in_mixer_buffer < 0)
+				continue;
+			
+			s->bytes_in_mixer_buffer -= min_bytes_in_mixer;
+		}
+	}
+}
+
+
+
+//
+// Server stuff
+//
 
 typedef struct {
 	void*  data;
@@ -54,7 +389,6 @@ typedef struct {
 	// Original start pointer, suitable for free()
 	void*  ptr;
 } buffer_t, *buffer_p;
-
 
 int server_fd = -1;
 size_t client_fd_cound = 0;
@@ -64,8 +398,6 @@ char*  header_ptr = NULL;
 size_t header_size = 0;
 array_p buffers = NULL;
 
-
-//FILE* webm_file = NULL;
 
 void mkv_build_header(uint16_t width, uint16_t height) {
 	//webm_file = fopen("video-scratchpad/test.webm", "wb");
@@ -313,14 +645,27 @@ typedef struct {
 
 
 int main(int argc, char** argv) {
-	if (argc != 2) {
-		fprintf(stderr, "usage: %s alsa-input\n", argv[0]);
-		return 1;
-	}
 	
+	// One cam test setup
+	video_input_t video_inputs[] = {
+		{ "/dev/video0", 640, 480, NULL, 0 }
+	};
+	
+	video_view_t *scenes[] = {
+		(video_view_t[]){
+			{ 'l', 0, 'c', 0,     0, -100, 0,     0 },
+			{ 0 }
+		},
+		(video_view_t[]){
+			{ 'l', 0, 'c', 0,     0, -100, 0,     0 },
+			{ 'r', 0, 'b', 0,     0,  -33, 0,     0 },
+			{ 0 }
+		}
+	};
+	/*
+	// Two cam setup
 	video_input_t video_inputs[] = {
 		{ "/dev/video0", 640, 480, NULL, 0 },
-		//{ "/dev/video2", 640, 480, NULL, 0 },
 		{ "/dev/video1", 640, 480, NULL, 0 }
 	};
 	
@@ -337,17 +682,9 @@ int main(int argc, char** argv) {
 		(video_view_t[]){
 			{ 'c', 0, 'c', 0,     1, -100, 0,     0 },
 			{ 0 }
-		}/*,
-		(video_view_t[]){
-			{ 'l', 0, 't', 0,     0, -100, 0,     0 },
-			{ 'r', 0, 'b', 0,     1,  -33, 0,     0 },
-			{ 0 }
-		},
-		(video_view_t[]){
-			{ 'c', 0, 'c', 0,     1, -100, 0,     0 },
-			{ 0 }
-		}*/
+		}
 	};
+	*/
 	
 	// Calculate rest of the configuration
 	size_t video_input_count = sizeof(video_inputs) / sizeof(video_inputs[0]);
@@ -395,6 +732,9 @@ int main(int argc, char** argv) {
 	
 	// Init signal handling
 	int signal_fd = signals_init();
+	
+	// Init sound
+	mixer_init(mainloop);
 	
 	// Init SDL
 	SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER);
@@ -520,13 +860,14 @@ int main(int argc, char** argv) {
 	
 	for(size_t i = 0; i < video_input_count; i++) {
 		video_input_p vi = &video_inputs[i];
-		mainloop->io_new(mainloop, vi->cam->fd, PA_IO_EVENT_INPUT, camera_frame_cb, vi);
+		pa_io_event* e = mainloop->io_new(mainloop, vi->cam->fd, PA_IO_EVENT_INPUT, camera_frame_cb, vi);
+		//mainloop->io_enable(e, PA_IO_EVENT_NULL);
 	}
 
 	mainloop->io_new(mainloop, server_fd, PA_IO_EVENT_INPUT, server_accept_cb, NULL);
 	
 	// Do the loop
-	uint32_t start_ms = SDL_GetTicks();
+	start_ms = SDL_GetTicks();
 	while ( pa_mainloop_iterate(poll_mainloop, true, NULL) >= 0 ) {
 		// Render new video frames if one or more frames have been uploaded
 		if (something_to_render) {
@@ -558,6 +899,8 @@ int main(int argc, char** argv) {
 			drawable_draw(gui);
 			
 			SDL_GL_SwapWindow(win);
+			
+			something_to_render = false;
 		}
 	}
 
@@ -607,6 +950,7 @@ int main(int argc, char** argv) {
 	SDL_GL_DeleteContext(gl_ctx);
 	SDL_DestroyWindow(win);
 	
+	mixer_cleanup();
 	pa_mainloop_free(poll_mainloop);
 	signals_cleanup(signal_fd);
 	
