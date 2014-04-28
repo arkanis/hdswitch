@@ -24,6 +24,7 @@ ffmpeg -y -i unix:server.sock -f webm - | ffmpeg2theora --output /dev/stdout --f
 #include <sys/signalfd.h>
 #include <signal.h>
 #include <unistd.h>
+#include <errno.h>
 
 #include "drawable.h"
 #include "stb_image.h"
@@ -382,6 +383,7 @@ static void mixer_on_new_mic_data(pa_stream *s, size_t length, void *userdata) {
 //
 // Server stuff
 //
+const char* socket_path = "server.sock";
 
 typedef struct {
 	void*  data;
@@ -391,7 +393,6 @@ typedef struct {
 } buffer_t, *buffer_p;
 
 int server_fd = -1;
-size_t client_fd_cound = 0;
 array_p client_fds = NULL;
 
 char*  header_ptr = NULL;
@@ -451,9 +452,9 @@ void mkv_build_header(uint16_t width, uint16_t height) {
 			ebml_element_string(f, MKV_Language, "ger");
 			
 			o4 = ebml_element_start(f, MKV_Audio);
-				ebml_element_float(f, MKV_SamplingFrequency, 48000);
-				ebml_element_uint(f, MKV_Channels, 2);
-				ebml_element_uint(f, MKV_BitDepth, 16);
+				ebml_element_float(f, MKV_SamplingFrequency, mixer_sample_spec.rate);
+				ebml_element_uint(f, MKV_Channels, mixer_sample_spec.channels);
+				ebml_element_uint(f, MKV_BitDepth, pa_sample_size(&mixer_sample_spec) * 8);
 			ebml_element_end(f, o4);
 			
 		ebml_element_end(f, o3);
@@ -462,63 +463,17 @@ void mkv_build_header(uint16_t width, uint16_t height) {
 	
 	fclose(f);
 }
-/*
-void webm_write_frame(uint64_t timecode_ms, void* frame_data, size_t frame_size) {
-	off_t o2, o3;
-	FILE* f = webm_file;
-	
-	o2 = ebml_element_start(f, MKV_Cluster);
-		ebml_element_uint(f, MKV_Timecode, timecode_ms);
-		o3 = ebml_element_start(f, MKV_SimpleBlock);
-			// Track number this frame belongs to
-			ebml_write_data_size(f, 1, 0);
-			
-			int16_t block_timecode = 0;
-			fwrite(&block_timecode, sizeof(block_timecode), 1, f);
-			
-			uint8_t flags = 0x80; // keyframe (1), reserved (000), not invisible (0), no lacing (00), not discardable (0)
-			fwrite(&flags, sizeof(flags), 1, f);
-			
-			fwrite(frame_data, frame_size, 1, f);
-		ebml_element_end(f, o3);
-	ebml_element_end(f, o2);
-}
-
-void webm_write_audio_frame(uint64_t timecode_ms, void* frame_data, size_t frame_size) {
-	off_t o2, o3;
-	FILE* f = webm_file;
-	
-	o2 = ebml_element_start(f, MKV_Cluster);
-		ebml_element_uint(f, MKV_Timecode, timecode_ms);
-		o3 = ebml_element_start(f, MKV_SimpleBlock);
-			// Track number this frame belongs to
-			ebml_write_data_size(f, 2, 0);
-			
-			int16_t block_timecode = 0;
-			fwrite(&block_timecode, sizeof(block_timecode), 1, f);
-			
-			uint8_t flags = 0x80; // keyframe (1), reserved (000), not invisible (0), no lacing (00), not discardable (0)
-			fwrite(&flags, sizeof(flags), 1, f);
-			
-			fwrite(frame_data, frame_size, 1, f);
-		ebml_element_end(f, o3);
-	ebml_element_end(f, o2);
-}
-
-void webm_stop() {
-	fclose(webm_file);
-}
-*/
-
-
 
 bool server_start(uint16_t width, uint16_t height) {
 	server_fd = socket(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0);
 	if (server_fd == -1)
 		return perror("socket"), false;
 	
-	unlink("server.sock");
-	struct sockaddr_un addr = { AF_UNIX, "server.sock" };
+	unlink(socket_path);
+	
+	struct sockaddr_un addr = { AF_UNIX, "" };
+	strncpy(addr.sun_path, socket_path, sizeof(addr.sun_path));
+	addr.sun_path[sizeof(addr.sun_path) - 1] = '\0';
 	if ( bind(server_fd, (struct sockaddr*)&addr, sizeof(addr)) == -1 )
 		return perror("bind"), false;
 	
@@ -605,8 +560,18 @@ void server_write_frame(uint8_t track, uint64_t timecode_ms, void* frame_data, s
 			ssize_t bytes_written = 0;
 			while (current_buffer->size > 0) {
 				bytes_written = write(client_fd, current_buffer->data, current_buffer->size);
-				if (bytes_written < 0)
+				if (bytes_written < 0) {
+					if (errno == EWOULDBLOCK) {
+						// Very common case, do nothing
+					} else if (errno == EPIPE) {
+						printf("client %d disconnected\n", client_fd);
+						close(client_fd);
+						array_data(client_fds, int)[i] = -1;
+					} else {
+						perror("write");
+					}
 					break;
+				}
 				
 				current_buffer->data += bytes_written;
 				current_buffer->size -= bytes_written;
@@ -622,6 +587,12 @@ void server_write_frame(uint8_t track, uint64_t timecode_ms, void* frame_data, s
 			}
 		}
 	}
+	
+	// Remove all disconnected clients (fd == -1)
+	bool elem_func(array_p a, size_t index){
+		return array_elem(a, int, index) == -1;
+	}
+	array_remove_func(client_fds, elem_func);
 }
 
 typedef struct {
@@ -964,6 +935,11 @@ int main(int argc, char** argv) {
 //
 
 static int signals_init() {
+	// Ignore SIGPIPE. This happens when we write into a closed socket. In that case the write()
+	// function also returns EPIPE which makes it easy to handle locally. No need for a signal here.
+	if ( signal(SIGPIPE, SIG_IGN) == SIG_ERR )
+		return perror("signal"), -1;
+	
 	// Setup SIGINT and SIGTERM to terminate our poll loop. For that we read them via a signal fd.
 	// To prevent the signals from interrupting our process we need to block them first.
 	sigset_t signal_mask;
@@ -996,6 +972,9 @@ static int signals_cleanup(int signal_fd) {
 	sigaddset(&signal_mask, SIGTERM);
 	if ( sigprocmask(SIG_UNBLOCK, &signal_mask, NULL) == -1 )
 		return perror("sigprocmask"), -1;
+	
+	if ( signal(SIGPIPE, SIG_DFL) == SIG_ERR )
+		return perror("signal"), -1;
 	
 	return 1;
 }
