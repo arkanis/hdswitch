@@ -32,6 +32,7 @@ ffmpeg -y -i unix:server.sock -f webm - | ffmpeg2theora --output /dev/stdout --f
 #include "timer.h"
 #include "ebml_writer.h"
 #include "array.h"
+#include "list.h"
 
 
 // Config variables
@@ -45,7 +46,7 @@ static int signals_cleanup(int signal_fd);
 static void signals_cb(pa_mainloop_api *ea, pa_io_event *e, int fd, pa_io_event_flags_t events, void *userdata);
 static void sdl_event_check_cb(pa_mainloop_api *a, pa_time_event *e, const struct timeval *tv, void *userdata);
 static void camera_frame_cb(pa_mainloop_api *ea, pa_io_event *e, int fd, pa_io_event_flags_t events, void *userdata);
-void server_write_frame(uint8_t track, uint64_t timecode_ms, void* frame_data, size_t frame_size);
+void server_queue_frame(pa_mainloop_api *mainloop, uint8_t track, uint64_t timecode_ms, void* frame_data, size_t frame_size);
 
 // Global stuff used by event callbacks
 size_t scene_count = 0;
@@ -83,6 +84,7 @@ uint64_t mixer_pts = 0;
 
 struct timeval mixer_global_start;
 pa_context* context = NULL;
+pa_mainloop_api* global_mainloop = NULL;
 uint16_t log_countdown = 0;
 
 static void mixer_on_context_state_changed(pa_context *c, void *userdata);
@@ -359,7 +361,7 @@ static void mixer_on_new_mic_data(pa_stream *s, size_t length, void *userdata) {
 	if (min_bytes_in_mixer > 0) {
 		pa_stream_write(audio_playback_stream, mixer_buffer_ptr, min_bytes_in_mixer, NULL, 0, PA_SEEK_RELATIVE);
 		uint64_t audio_timecode = SDL_GetTicks() - start_ms - pa_bytes_to_usec(min_bytes_in_mixer, &mixer_sample_spec) / 1000;
-		server_write_frame(2, audio_timecode, mixer_buffer_ptr, min_bytes_in_mixer);
+		server_queue_frame(global_mainloop, 2, audio_timecode, mixer_buffer_ptr, min_bytes_in_mixer);
 		
 		size_t incomplete_mixer_bytes = max_bytes_in_mixer - min_bytes_in_mixer;
 		if (incomplete_mixer_bytes > 0) {
@@ -386,23 +388,34 @@ static void mixer_on_new_mic_data(pa_stream *s, size_t length, void *userdata) {
 const char* socket_path = "server.sock";
 
 typedef struct {
-	void*  data;
+	int fd;
+	pa_io_event* io_event;
+	
+	void* ptr;
 	size_t size;
-	// Original start pointer, suitable for free()
+	
+	list_node_p current_buffer_node;
+} client_t, *client_p;
+
+typedef struct {
 	void*  ptr;
+	size_t size;
+	size_t refcount;
 } buffer_t, *buffer_p;
 
 int server_fd = -1;
-array_p client_fds = NULL;
+list_p clients = NULL;
+list_p buffers = NULL;
 
-char*  header_ptr = NULL;
-size_t header_size = 0;
-array_p buffers = NULL;
+buffer_t header;
+
+static void server_on_client_writable(pa_mainloop_api *mainloop, pa_io_event *e, int fd, pa_io_event_flags_t events, void *userdata);
+static void buffer_node_unref(list_node_p buffer_node);
 
 
 void mkv_build_header(uint16_t width, uint16_t height) {
 	//webm_file = fopen("video-scratchpad/test.webm", "wb");
-	FILE* f = open_memstream(&header_ptr, &header_size);
+	FILE* f = open_memstream((char**)&header.ptr, &header.size);
 	
 	off_t o1, o2, o3, o4;
 	
@@ -480,22 +493,25 @@ bool server_start(uint16_t width, uint16_t height) {
 	if ( listen(server_fd, 3) == -1 )
 		return perror("listen"), false;
 	
-	client_fds = array_of(int);
+	clients = list_of(client_t);
+	buffers = list_of(buffer_t);
 	mkv_build_header(width, height);
-	
-	buffers = array_of(buffer_t);
 	
 	return true;
 }
 
-void server_close() {
-	for(size_t i = 0; i < client_fds->length; i++)
-		close(array_elem(client_fds, int, i));
-	array_destroy(client_fds);
+void server_close(pa_mainloop_api* mainloop) {
+	for(list_node_p n = clients->first; n != NULL; n = n->next) {
+		client_p client = list_value_ptr(n);
+		
+		close(client->fd);
+		mainloop->io_free(client->io_event);
+	}
+	list_destroy(clients);
 	close(server_fd);
 	
-	array_destroy(buffers);
-	free(header_ptr);
+	list_destroy(buffers);
+	free(header.ptr);
 }
 
 static void server_accept_cb(pa_mainloop_api *mainloop, pa_io_event *e, int fd, pa_io_event_flags_t events, void *userdata) {
@@ -505,21 +521,154 @@ static void server_accept_cb(pa_mainloop_api *mainloop, pa_io_event *e, int fd, 
 		return;
 	}
 	
-	array_append(client_fds, int, client_fd);
-	void*  data = header_ptr;
-	size_t size = header_size;
-	ssize_t bytes_written = 0;
-	while ( (bytes_written = write(client_fd, data, size)) > 0 ) {
-		data += bytes_written;
-		size -= bytes_written;
-	}
+	client_p client = list_append_ptr(clients);
+	list_node_p client_node = clients->last;
 	
-	if (bytes_written < 0)
-		perror("write");
+	client->fd = client_fd;
+	client->io_event = mainloop->io_new(mainloop, client->fd, PA_IO_EVENT_OUTPUT, server_on_client_writable, client_node);
 	
-	//write(client_fd, header_ptr, header_size);
+	client->ptr = header.ptr;
+	client->size = header.size;
+	client->current_buffer_node = NULL;
+	
+	printf("[client %d] connected\n", client->fd);
 }
 
+static void server_on_client_disconnect(pa_mainloop_api *mainloop, list_node_p client_node) {
+	client_p client = list_value_ptr(client_node);
+	
+	printf("[client %d] disconnected\n", client->fd);
+	
+	// Cleanup this client
+	close(client->fd);
+	mainloop->io_free(client->io_event);
+	
+	// unref all buffers this client would've read
+	if (client->current_buffer_node) {
+		for (list_node_p node = client->current_buffer_node, next = NULL; node != NULL; node = next) {
+			next = node->next;
+			buffer_node_unref(node);
+		}
+	}
+	
+	list_remove(clients, client_node);
+}
+
+static void server_on_client_writable(pa_mainloop_api *mainloop, pa_io_event *e, int fd, pa_io_event_flags_t events, void *userdata) {
+	client_p client = list_value_ptr(userdata);
+	//printf("[client %d] writing data\n", client->fd);
+	
+	while (true) {
+		ssize_t bytes_written = 0;
+		while (client->size > 0) {
+			bytes_written = write(client->fd, client->ptr, client->size);
+			if (bytes_written < 0) {
+				if (errno == EWOULDBLOCK) {
+					// Very common case, do nothing
+				} else if (errno == EPIPE) {
+					server_on_client_disconnect(mainloop, userdata);
+				} else {
+					perror("write");
+				}
+				break;
+			}
+			
+			client->ptr  += bytes_written;
+			client->size -= bytes_written;
+		}
+		
+		if (bytes_written >= 0) {
+			// Buffer finished, switch to next one
+			client->ptr = NULL;
+			
+			if (client->current_buffer_node != NULL) {
+				list_node_p finished_buffer_node = client->current_buffer_node;
+				client->current_buffer_node = client->current_buffer_node->next;
+				buffer_node_unref(finished_buffer_node);
+			}
+			
+			if (client->current_buffer_node != NULL) {
+				// There is a next buffer ready. Switch this client to it.
+				//printf("[client %d] switching to next buffer\n", client->fd);
+				buffer_p next_buffer = list_value_ptr(client->current_buffer_node);
+				client->ptr  = next_buffer->ptr;
+				client->size = next_buffer->size;
+			} else {
+				// No next buffer, the client is stalled now. Disable it from the
+				// mainloop since we don't have any data to write. We'll resume when
+				// the next buffer comes around.
+				//printf("[client %d] stalled\n", client->fd);
+				mainloop->io_enable(client->io_event, PA_IO_EVENT_NULL);
+				break;
+			}
+		} else {
+			// Didn't finish buffer, continue next time we can write to client
+			break;
+		}
+	}
+}
+
+static void buffer_node_unref(list_node_p buffer_node) {
+	buffer_p buffer = list_value_ptr(buffer_node);
+	buffer->refcount--;
+	
+	if (buffer->refcount == 0) {
+		free(buffer->ptr);
+		list_remove(buffers, buffer_node);
+		//printf("[server] freeing buffer\n");
+	}
+}
+
+void server_queue_frame(pa_mainloop_api *mainloop, uint8_t track, uint64_t timecode_ms, void* frame_data, size_t frame_size) {
+	size_t connected_client_count = list_count(clients);
+	// Throw the buffer away if no one is listening
+	if (connected_client_count == 0)
+		return;
+	
+	//printf("[server] queuing frame\n");
+	buffer_p buffer = list_append_ptr(buffers);
+	buffer->refcount = connected_client_count;
+	
+	FILE* f = open_memstream((char**)&buffer->ptr, &buffer->size);
+	
+	off_t o2, o3;
+	o2 = ebml_element_start(f, MKV_Cluster);
+		ebml_element_uint(f, MKV_Timecode, timecode_ms);
+		o3 = ebml_element_start(f, MKV_SimpleBlock);
+			// Track number this frame belongs to
+			ebml_write_data_size(f, track, 0);
+			
+			int16_t block_timecode = 0;
+			fwrite(&block_timecode, sizeof(block_timecode), 1, f);
+			
+			uint8_t flags = 0x80; // keyframe (1), reserved (000), not invisible (0), no lacing (00), not discardable (0)
+			fwrite(&flags, sizeof(flags), 1, f);
+			
+			fwrite(frame_data, frame_size, 1, f);
+		ebml_element_end(f, o3);
+	ebml_element_end(f, o2);
+	
+	fclose(f);
+	
+	// Check all clients and resume writing if necessary
+	for(list_node_p n = clients->first; n != NULL; n = n->next) {
+		client_p client = list_value_ptr(n);
+		
+		if (client->current_buffer_node == NULL) {
+			// Switch client to the new buffer it it's stalled
+			client->current_buffer_node = buffers->last;
+			if (client->ptr == NULL) {
+				client->ptr  = buffer->ptr;
+				client->size = buffer->size;
+			}
+			
+			// Enable this client in the mainloop
+			//printf("[client %d] resuming\n", client->fd);
+			mainloop->io_enable(client->io_event, PA_IO_EVENT_OUTPUT);
+		}
+	}
+}
+/*
 void server_write_frame(uint8_t track, uint64_t timecode_ms, void* frame_data, size_t frame_size) {
 	buffer_t buffer = { 0 };
 	FILE* f = open_memstream((char**)&buffer.ptr, &buffer.size);
@@ -594,6 +743,8 @@ void server_write_frame(uint8_t track, uint64_t timecode_ms, void* frame_data, s
 	}
 	array_remove_func(client_fds, elem_func);
 }
+*/
+
 
 typedef struct {
 	char* device_file;
@@ -700,6 +851,7 @@ int main(int argc, char** argv) {
 	// Init mainloop
 	pa_mainloop* poll_mainloop = pa_mainloop_new();
 	pa_mainloop_api* mainloop = pa_mainloop_get_api(poll_mainloop);
+	global_mainloop = mainloop;
 	
 	// Init signal handling
 	int signal_fd = signals_init();
@@ -863,7 +1015,7 @@ int main(int argc, char** argv) {
 			fbo_bind(NULL);
 			
 			fbo_read(stream_fbo, GL_RG, GL_UNSIGNED_BYTE, stream_video_ptr);
-			server_write_frame(1, SDL_GetTicks() - start_ms, stream_video_ptr, stream_video_size);
+			server_queue_frame(mainloop, 1, SDL_GetTicks() - start_ms, stream_video_ptr, stream_video_size);
 			
 			glViewport(0, 0, ww, wh);
 			
@@ -891,7 +1043,7 @@ int main(int argc, char** argv) {
 		//printf("poll: %.1lf ms (%.1lf fps), cam: %.1lf ms, tex update: %.1lf ms, draw: %.1lf ms, swap: %.1lf\n",
 		//	poll_time, 1000.0 / poll_time, frame_time, tex_update_time, draw_time, swap_time);
 	
-	server_close();
+	server_close(mainloop);
 	
 	for(size_t i = 0; i < video_input_count; i++) {
 		video_input_p vi = &video_inputs[i];
