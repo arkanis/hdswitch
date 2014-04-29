@@ -38,6 +38,7 @@ ffmpeg -y -i unix:server.sock -f webm - | ffmpeg2theora --output /dev/stdout --f
 // Config variables
 const uint32_t latency_ms = 10;
 const uint32_t mixer_buffer_time_ms = 1000;
+const uint32_t max_latency_for_mixer_block_ms = 20;
 
 
 static int signals_init();
@@ -55,6 +56,8 @@ size_t ww, wh;
 bool something_to_render = false;
 uint32_t start_ms = 0;
 
+usec_t global_start_walltime = 0;
+
 
 //
 // Mixer stuff
@@ -65,7 +68,8 @@ struct mic_s {
 	ssize_t bytes_in_mixer_buffer;
 	pa_stream* stream;
 	char* name;
-	struct timeval start;
+	usec_t start;
+	uint64_t pts;
 	mic_p next;
 };
 mic_p mics = NULL;
@@ -82,7 +86,6 @@ void*    mixer_buffer_ptr = NULL;
 size_t   mixer_buffer_size = 0;
 uint64_t mixer_pts = 0;
 
-struct timeval mixer_global_start;
 pa_context* context = NULL;
 pa_mainloop_api* global_mainloop = NULL;
 uint16_t log_countdown = 0;
@@ -114,7 +117,6 @@ static void mixer_on_context_state_changed(pa_context *c, void *userdata) {
 		case PA_CONTEXT_SETTING_NAME: printf("PA_CONTEXT_SETTING_NAME\n"); break;
 		case PA_CONTEXT_READY:        printf("PA_CONTEXT_READY\n");
 			{
-				gettimeofday(&mixer_global_start, NULL);
 				pa_operation* op = pa_context_get_source_info_list(c, source_info_list_cb, NULL);
 				pa_operation_unref(op);
 			}
@@ -214,6 +216,49 @@ static void mixer_on_new_mic_data(pa_stream *s, size_t length, void *userdata) {
 		}
 	}
 	*/
+	
+	
+	bool init_stream_if_latency_known_or_drop_data() {
+		pa_usec_t latency = 0;
+		int negative = 0;
+		int result = pa_stream_get_latency(s, &latency, &negative);
+		
+		if (result != -PA_ERR_NODATA) {
+			printf("  stream latency: %.2lf ms\n", latency / 1000.0);
+			
+			stream_data->bytes_in_mixer_buffer = 0;
+			stream_data->pts = time_now() - latency - global_start_walltime;
+			
+			printf("  pts: %.2lf ms\n", stream_data->pts / 1000.0);
+			
+			if (mixer_pts == 0)
+				mixer_pts = stream_data->pts;
+			
+			// If the stream latency is above the mixer block threshold don't make
+			// the mixer wait (block) for this stream but instead mix it as we get it.
+			// This way the user might be able to detect the faulty mic with to much latency.
+			if (latency / 1000 > max_latency_for_mixer_block_ms) {
+				stream_data->pts = mixer_pts;
+				printf("  IGNORING MIC LATENCY because it's to high! We don't want everything to wait for it.\n");
+			}
+			
+			return true;
+		} else {
+			printf("  no stream latency data yet!\n");
+			
+			while (pa_stream_readable_size(s) > 0) {
+				if (pa_stream_peek(s, &in_buffer_ptr, &in_buffer_size) < 0) {
+					fprintf(stderr, "  Read failed\n");
+					return false;
+				}
+				pa_stream_drop(s);
+			}
+			
+			return false;
+		}
+	}
+	
+	
 	// Initialize the byte offset only as soon as we got the first data packet.
 	// Otherwise always waits for this stream from it's start to the arival of the first packet.
 	if (stream_data->bytes_in_mixer_buffer == -1) {
@@ -236,12 +281,9 @@ static void mixer_on_new_mic_data(pa_stream *s, size_t length, void *userdata) {
 			printf("audio_playback_stream sample_spec: %s\n", buffer);
 		}
 		
-		gettimeofday(&stream_data->start, NULL);
-		struct timeval start_delay;
-		timersub(&stream_data->start, &mixer_global_start, &start_delay);
 		printf("[%p] start after %.2lf ms, initial data: %zu bytes, %.2lf ms\n",
-			s, start_delay.tv_sec * 1000.0 + start_delay.tv_usec / 1000.0,
-			length, pa_bytes_to_usec(length, &mixer_sample_spec) / 1000.0);
+			s, (time_now() - global_start_walltime) / 1000.0, length,
+			pa_bytes_to_usec(length, &mixer_sample_spec) / 1000.0);
 		
 		pa_usec_t latency = 0;
 		int negative = 0;
@@ -250,46 +292,40 @@ static void mixer_on_new_mic_data(pa_stream *s, size_t length, void *userdata) {
 			printf("  no stream latency data yet!\n");
 		} else {
 			printf("  stream latency: %.2lf ms\n", latency / 1000.0);
-			//if (latency > 20*1000)
-			//	pa_stream_flush(s, NULL, NULL);
 		}
 		
 		char buffer[512] = { 0 };
 		pa_sample_spec_snprint(buffer, sizeof(buffer), pa_stream_get_sample_spec(s));
 		printf("  sample_spec: %s\n", buffer);
-
 		
 		pa_operation* op = pa_stream_flush(s, NULL, NULL);
 		pa_operation_unref(op);
+		
 		return;
 	} else if (stream_data->bytes_in_mixer_buffer == -2) {
-		stream_data->bytes_in_mixer_buffer = 0;
+		stream_data->bytes_in_mixer_buffer = -3;
 		
-		gettimeofday(&stream_data->start, NULL);
-		struct timeval start_delay;
-		timersub(&stream_data->start, &mixer_global_start, &start_delay);
 		printf("[%p] first packet after flush, after %.2lf ms, data: %zu bytes, %.2lf ms\n",
-			s, start_delay.tv_sec * 1000.0 + start_delay.tv_usec / 1000.0,
-			length, pa_bytes_to_usec(length, &mixer_sample_spec) / 1000.0);
+			s, (time_now() - global_start_walltime) / 1000.0, length,
+			pa_bytes_to_usec(length, &mixer_sample_spec) / 1000.0);
 		
-		pa_usec_t latency = 0;
-		int negative = 0;
-		int result = pa_stream_get_latency(s, &latency, &negative);
-		if (result == -PA_ERR_NODATA) {
-			printf("no stream latency data yet!\n");
-		} else {
-			printf("stream latency: %.2lf ms\n", latency / 1000.0);
-			//if (latency > 20*1000)
-			//	pa_stream_flush(s, NULL, NULL);
+		if ( ! init_stream_if_latency_known_or_drop_data() ) {
+			return;
 		}
+	} else if (stream_data->bytes_in_mixer_buffer == -3) {
+		printf("[%p] packet with unknown latency, after %.2lf ms, data: %zu bytes, %.2lf ms\n",
+			s, (time_now() - global_start_walltime) / 1000.0, length,
+			pa_bytes_to_usec(length, &mixer_sample_spec) / 1000.0);
 		
-		return;
+		if ( ! init_stream_if_latency_known_or_drop_data() ) {
+			return;
+		}
 	}
 	
 	//log_countdown = (log_countdown + 1) % 100;
-	log_countdown = 1;
-	if (!log_countdown) printf("mixer_on_new_mic_data, stream %p, %6zu bytes, %.2lf ms\n",
-		s, length, pa_bytes_to_usec(length, &mixer_sample_spec) / 1000.0);
+	log_countdown = 0;
+	if (!log_countdown) printf("[%p, %.2lf ms] %6zu bytes, %.2lf ms\n",
+		s, stream_data->pts / 1000.0, length, pa_bytes_to_usec(length, &mixer_sample_spec) / 1000.0);
 	
 	while (pa_stream_readable_size(s) > 0) {
 		// peek actually creates and fills the data vbl
@@ -318,31 +354,61 @@ static void mixer_on_new_mic_data(pa_stream *s, size_t length, void *userdata) {
 		//printf("  %zu bytes\n", in_buffer_size);
 		//pa_stream_write(audio_playback_stream, in_buffer_ptr, in_buffer_size, NULL, 0, PA_SEEK_RELATIVE);
 		
-		// Mix new sample into the mixer buffer
-		const int16_t* in_samples_ptr = in_buffer_ptr;
-		size_t in_sample_count = in_buffer_size / sizeof(in_samples_ptr[0]);
-		int16_t* mixer_samples_ptr = mixer_buffer_ptr + stream_data->bytes_in_mixer_buffer;
+		uint64_t start_pts = stream_data->pts;
+		uint64_t end_pts = stream_data->pts + pa_bytes_to_usec(in_buffer_size, &mixer_sample_spec);
 		
-		for(size_t i = 0; i < in_sample_count; i++) {
-			//mixer_samples_ptr[i] = in_samples_ptr[i];
-			
-			int16_t a = mixer_samples_ptr[i], b = in_samples_ptr[i];
-			if (a < 0 && b < 0)
-				mixer_samples_ptr[i] = (a + b) - (a * b) / INT16_MIN;
-			else if (a > 0 && b > 0)
-				mixer_samples_ptr[i] = (a + b) - (a * b) / INT16_MAX;
-			else
-				mixer_samples_ptr[i] = a + b;
+		const int16_t* in_samples_ptr = NULL;
+		size_t in_sample_count = 0, in_samples_size = 0;;
+		
+		if (start_pts >= mixer_pts) {
+			// The audio packet is newer than the stuff emitted by the mixer. So we can write
+			// our entire audio into the mixer.
+			in_samples_ptr  = in_buffer_ptr;
+			in_samples_size = in_buffer_size;
+			in_sample_count = in_samples_size / sizeof(in_samples_ptr[0]);
+			printf("  writing %zu bytes into mixer\n", in_buffer_size);
+		} else if (start_pts < mixer_pts && end_pts > mixer_pts) {
+			// A part of the audio packet is to old but the rest is new stuff that should be
+			// written into the mixer.
+			size_t size_of_old_stuff = pa_usec_to_bytes(mixer_pts - start_pts, &mixer_sample_spec);
+			in_samples_ptr  = in_buffer_ptr + size_of_old_stuff;
+			in_samples_size = in_buffer_size - size_of_old_stuff;
+			in_sample_count = in_samples_size / sizeof(in_samples_ptr[0]);
+			printf("  skipping %zu bytes, writing %zu bytes into mixer (start %lu, end %lu, mixer %lu)\n",
+				size_of_old_stuff, in_buffer_size - size_of_old_stuff, start_pts, end_pts, mixer_pts);
+		} else {
+			// This entire audio packet is way to old. The mixer already emitted newer audio
+			// data. So throw this packet away.
+			printf("  skipping %zu bytes (start %lu, end %lu, mixer %lu)\n",
+				in_buffer_size, start_pts, end_pts, mixer_pts);
 		}
-		stream_data->bytes_in_mixer_buffer += in_buffer_size;
 		
+		if (in_samples_ptr) {
+			// Mix new sample into the mixer buffer
+			int16_t* mixer_samples_ptr = mixer_buffer_ptr + stream_data->bytes_in_mixer_buffer;
+			
+			for(size_t i = 0; i < in_sample_count; i++) {
+				//mixer_samples_ptr[i] = in_samples_ptr[i];
+				
+				int16_t a = mixer_samples_ptr[i], b = in_samples_ptr[i];
+				if (a < 0 && b < 0)
+					mixer_samples_ptr[i] = (a + b) - (a * b) / INT16_MIN;
+				else if (a > 0 && b > 0)
+					mixer_samples_ptr[i] = (a + b) - (a * b) / INT16_MAX;
+				else
+					mixer_samples_ptr[i] = a + b;
+			}
+			stream_data->bytes_in_mixer_buffer += in_samples_size;
+		}
+		
+		stream_data->pts += pa_bytes_to_usec(in_buffer_size, &mixer_sample_spec);
 		// swallow the data peeked at before
 		pa_stream_drop(s);
 	}
 	
 	// Check if a part of the mixer buffer has been written to by all streams. In that case
 	// this part contains data from all streams and can be written out.
-	if (!log_countdown) printf("  mixer bytes: ");
+	if (!log_countdown) printf("  mixer %.2lf pts, bytes: ", mixer_pts / 1000.0);
 	ssize_t min_bytes_in_mixer = INT32_MAX, max_bytes_in_mixer = 0;
 	for(mic_p s = mics; s != NULL; s = s->next) {
 		if (!log_countdown) printf("%4zd ", s->bytes_in_mixer_buffer);
@@ -360,8 +426,9 @@ static void mixer_on_new_mic_data(pa_stream *s, size_t length, void *userdata) {
 	
 	if (min_bytes_in_mixer > 0) {
 		pa_stream_write(audio_playback_stream, mixer_buffer_ptr, min_bytes_in_mixer, NULL, 0, PA_SEEK_RELATIVE);
-		uint64_t audio_timecode = SDL_GetTicks() - start_ms - pa_bytes_to_usec(min_bytes_in_mixer, &mixer_sample_spec) / 1000;
-		server_queue_frame(global_mainloop, 2, audio_timecode, mixer_buffer_ptr, min_bytes_in_mixer);
+		server_queue_frame(global_mainloop, 2, mixer_pts, mixer_buffer_ptr, min_bytes_in_mixer);
+		
+		mixer_pts += pa_bytes_to_usec(min_bytes_in_mixer, &mixer_sample_spec);
 		
 		size_t incomplete_mixer_bytes = max_bytes_in_mixer - min_bytes_in_mixer;
 		if (incomplete_mixer_bytes > 0) {
@@ -426,7 +493,7 @@ void mkv_build_header(uint16_t width, uint16_t height) {
 	ebml_element_start_unkown_data_size(f, MKV_Segment);
 	
 	o2 = ebml_element_start(f, MKV_Info);
-		ebml_element_uint(f, MKV_TimecodeScale, 1000000);
+		ebml_element_uint(f, MKV_TimecodeScale, 1000);  // specify timestamps in microseconds (usec)
 		ebml_element_string(f, MKV_MuxingApp, "ebml_writer v0.1");
 		ebml_element_string(f, MKV_WritingApp, "HDswitch v0.1");
 	ebml_element_end(f, o2);
@@ -619,7 +686,7 @@ static void buffer_node_unref(list_node_p buffer_node) {
 	}
 }
 
-void server_queue_frame(pa_mainloop_api *mainloop, uint8_t track, uint64_t timecode_ms, void* frame_data, size_t frame_size) {
+void server_queue_frame(pa_mainloop_api *mainloop, uint8_t track, uint64_t timecode_us, void* frame_data, size_t frame_size) {
 	size_t connected_client_count = list_count(clients);
 	// Throw the buffer away if no one is listening
 	if (connected_client_count == 0)
@@ -633,7 +700,7 @@ void server_queue_frame(pa_mainloop_api *mainloop, uint8_t track, uint64_t timec
 	
 	off_t o2, o3;
 	o2 = ebml_element_start(f, MKV_Cluster);
-		ebml_element_uint(f, MKV_Timecode, timecode_ms);
+		ebml_element_uint(f, MKV_Timecode, timecode_us);
 		o3 = ebml_element_start(f, MKV_SimpleBlock);
 			// Track number this frame belongs to
 			ebml_write_data_size(f, track, 0);
@@ -976,9 +1043,7 @@ int main(int argc, char** argv) {
 	// Prepare mainloop event callbacks
 	mainloop->io_new(mainloop, signal_fd, PA_IO_EVENT_INPUT, signals_cb, NULL);
 	
-	struct timeval now = { 0 }, interval = {0, 25*1000}, next_sdl_check_time = { 0 };
-	gettimeofday(&now, NULL);
-	timeradd(&now, &interval, &next_sdl_check_time);
+	struct timeval next_sdl_check_time = usec_to_timeval( time_now() + 25000 );
 	mainloop->time_new(mainloop, &next_sdl_check_time, sdl_event_check_cb, NULL);
 	
 	for(size_t i = 0; i < video_input_count; i++) {
@@ -990,7 +1055,7 @@ int main(int argc, char** argv) {
 	mainloop->io_new(mainloop, server_fd, PA_IO_EVENT_INPUT, server_accept_cb, NULL);
 	
 	// Do the loop
-	start_ms = SDL_GetTicks();
+	global_start_walltime = time_now();
 	while ( pa_mainloop_iterate(poll_mainloop, true, NULL) >= 0 ) {
 		// Render new video frames if one or more frames have been uploaded
 		if (something_to_render) {
@@ -1015,7 +1080,9 @@ int main(int argc, char** argv) {
 			fbo_bind(NULL);
 			
 			fbo_read(stream_fbo, GL_RG, GL_UNSIGNED_BYTE, stream_video_ptr);
-			server_queue_frame(mainloop, 1, SDL_GetTicks() - start_ms, stream_video_ptr, stream_video_size);
+			
+			uint64_t timecode = time_now() - global_start_walltime;
+			server_queue_frame(mainloop, 1, timecode, stream_video_ptr, stream_video_size);
 			
 			glViewport(0, 0, ww, wh);
 			
@@ -1173,9 +1240,7 @@ static void sdl_event_check_cb(pa_mainloop_api *mainloop, pa_time_event *e, cons
 	}
 	
 	// Restart the timer for the next time
-	struct timeval now = { 0 }, interval = {0, 25*1000}, next_sdl_check_time = { 0 };
-	gettimeofday(&now, NULL);
-	timeradd(&now, &interval, &next_sdl_check_time);
+	struct timeval next_sdl_check_time = usec_to_timeval( time_now() + 25000 );
 	mainloop->time_restart(e, &next_sdl_check_time);
 }
 
