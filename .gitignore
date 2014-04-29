@@ -12,3 +12,4 @@ experiments/alsa_pcm_list
 experiments/pulse
 
 audio.raw
+core
