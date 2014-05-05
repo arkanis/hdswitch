@@ -13,3 +13,4 @@ experiments/pulse
 
 audio.raw
 core
+server.sock
