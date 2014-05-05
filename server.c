@@ -8,8 +8,6 @@
 #include <sys/un.h>
 #include <errno.h>
 
-#include <pulse/pulseaudio.h>
-
 #include "list.h"
 #include "ebml_writer.h"
 #include "server.h"
