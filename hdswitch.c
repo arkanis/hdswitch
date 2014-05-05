@@ -462,6 +462,7 @@ typedef struct {
 	size_t size;
 	
 	list_node_p current_buffer_node;
+	list_node_p disconnect_at_node;
 } client_t, *client_p;
 
 typedef struct {
@@ -597,6 +598,7 @@ static void server_accept_cb(pa_mainloop_api *mainloop, pa_io_event *e, int fd, 
 	client->ptr = header.ptr;
 	client->size = header.size;
 	client->current_buffer_node = NULL;
+	client->disconnect_at_node = NULL;
 	
 	printf("[client %d] connected\n", client->fd);
 }
@@ -654,6 +656,14 @@ static void server_on_client_writable(pa_mainloop_api *mainloop, pa_io_event *e,
 				buffer_node_unref(finished_buffer_node);
 			}
 			
+			if (client->disconnect_at_node != NULL && client->disconnect_at_node == client->current_buffer_node) {
+				// Client is marked to be disconnected as soon as it encounters the
+				// current buffer. So do it.
+				printf("[client %d] disconnecting at buffer %p\n", client->fd, client->disconnect_at_node);
+				server_on_client_disconnect(mainloop, userdata);
+				break;
+			}
+			
 			if (client->current_buffer_node != NULL) {
 				// There is a next buffer ready. Switch this client to it.
 				//printf("[client %d] switching to next buffer\n", client->fd);
@@ -683,6 +693,13 @@ static void buffer_node_unref(list_node_p buffer_node) {
 		free(buffer->ptr);
 		list_remove(buffers, buffer_node);
 		//printf("[server] freeing buffer\n");
+	}
+}
+
+static void server_flush_and_disconnect_clients() {
+	for(list_node_p n = clients->first; n != NULL; n = n->next) {
+		client_p client = list_value_ptr(n);
+		client->disconnect_at_node = buffers->last;
 	}
 }
 
@@ -834,7 +851,7 @@ typedef struct {
 
 
 int main(int argc, char** argv) {
-	
+	/*
 	// One cam test setup
 	video_input_t video_inputs[] = {
 		{ "/dev/video0", 640, 480, NULL, 0 }
@@ -851,7 +868,7 @@ int main(int argc, char** argv) {
 			{ 0 }
 		}
 	};
-	/*
+	*/
 	// Two cam setup
 	video_input_t video_inputs[] = {
 		{ "/dev/video0", 640, 480, NULL, 0 },
@@ -873,7 +890,7 @@ int main(int argc, char** argv) {
 			{ 0 }
 		}
 	};
-	*/
+	
 	
 	// Calculate rest of the configuration
 	size_t video_input_count = sizeof(video_inputs) / sizeof(video_inputs[0]);
@@ -1236,6 +1253,10 @@ static void sdl_event_check_cb(pa_mainloop_api *mainloop, pa_time_event *e, cons
 				printf("switching to scene %zu\n", num);
 				scene_idx = num;
 			}
+		}
+		
+		if (event.type == SDL_KEYDOWN && event.key.keysym.sym >= SDLK_d) {
+			server_flush_and_disconnect_clients();
 		}
 	}
 	
