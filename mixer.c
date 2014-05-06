@@ -7,7 +7,6 @@
 
 #include <pulse/pulseaudio.h>
 
-#include "server.h"
 #include "timer.h"
 #include "mixer.h"
 
@@ -24,19 +23,25 @@ pa_sample_spec mixer_sample_spec;
 
 typedef struct mic_s mic_t, *mic_p;
 struct mic_s {
-	ssize_t bytes_in_mixer_buffer;
 	pa_stream* stream;
+	uint8_t state;
+	uint64_t pts;
+	
 	char* name;
 	usec_t start;
-	uint64_t pts;
+	
 	mic_p next;
 };
 mic_p mics = NULL;
 pa_stream* audio_playback_stream = NULL;
 
+#define MIC_STATE_WAITING_FOR_FIRST_PACKET   0
+#define MIC_STATE_WAITING_FOR_KNOWN_LATENCY  1
+#define MIC_STATE_MIXING                     2
 
 void*    mixer_buffer_ptr = NULL;
 size_t   mixer_buffer_size = 0;
+size_t   mixer_pos = 0;
 uint64_t mixer_pts = 0;
 
 pa_context* context = NULL;
@@ -45,7 +50,8 @@ static usec_t global_start_walltime = 0;
 
 static void mixer_on_context_state_changed(pa_context *c, void *userdata);
 static void source_info_list_cb(pa_context *c, const pa_source_info *i, int eol, void *userdata);
-static void mixer_on_new_mic_data(pa_stream *s, size_t length, void *userdata);
+static void on_new_mic_data(pa_stream *s, size_t length, void *userdata);
+static void playback_audio(void* buffer_ptr, size_t buffer_size);
 
 
 bool mixer_start(usec_t start_walltime, uint32_t requested_latency_ms, uint32_t buffer_time_ms, uint32_t max_latency_to_block_for_ms, pa_sample_spec sample_spec, pa_mainloop_api* mainloop) {
@@ -72,6 +78,22 @@ void mixer_stop() {
 	pa_context_disconnect(context);
 }
 
+void mixer_output_peek(void** buffer_ptr, size_t* buffer_size, uint64_t* buffer_pts) {
+	*buffer_ptr  = mixer_buffer_ptr;
+	*buffer_size = mixer_pos;
+	*buffer_pts  = mixer_pts - pa_bytes_to_usec(mixer_pos, &mixer_sample_spec);
+}
+
+void mixer_output_consume() {
+	size_t remaining_size = mixer_buffer_size - mixer_pos;
+	// Move everything after the mixer pos to the start of the mixer buffer
+	memmove(mixer_buffer_ptr, mixer_buffer_ptr + mixer_pos, remaining_size);
+	// Zero the now unused buffer area so it's safe to mix new data onto it
+	memset(mixer_buffer_ptr + remaining_size, 0, mixer_pos);
+	
+	mixer_pos = 0;
+}
+
 
 //
 // Event handlers
@@ -91,7 +113,6 @@ static void mixer_on_context_state_changed(pa_context *c, void *userdata) {
 			break;
 		case PA_CONTEXT_FAILED:       printf("PA_CONTEXT_FAILED\n");     break;
 		case PA_CONTEXT_TERMINATED:   printf("PA_CONTEXT_TERMINATED\n"); break;
-		//default: break;
 	}
 }
 
@@ -137,13 +158,15 @@ static void source_info_list_cb(pa_context *c, const pa_source_info *i, int eol,
 	}
 	
 	mic_p mic = malloc(sizeof(mic_t));
-	mic->bytes_in_mixer_buffer = -1;
-	mic->next = mics;
+	mic->state = MIC_STATE_WAITING_FOR_FIRST_PACKET;
 	mic->stream = pa_stream_new(c, "HDswitch", &mixer_sample_spec, NULL);
+	
 	mic->name = strdup(i->description);
+	
+	mic->next = mics;
 	mics = mic;
 	
-	pa_stream_set_read_callback(mic->stream, mixer_on_new_mic_data, mic);
+	pa_stream_set_read_callback(mic->stream, on_new_mic_data, mic);
 	
 	pa_buffer_attr buffer_attr = { 0 };
 	buffer_attr.maxlength = (uint32_t) -1;
@@ -158,202 +181,173 @@ static void source_info_list_cb(pa_context *c, const pa_source_info *i, int eol,
 }
 
 
-static void mixer_on_new_mic_data(pa_stream *s, size_t length, void *userdata) {
-	const void *in_buffer_ptr;
-	size_t in_buffer_size;
-	mic_p stream_data = userdata;
-	/*
-	if (stream_data->bytes_in_mixer_buffer == -1) {
-		stream_data->bytes_in_mixer_buffer = 0;
-		
-		if (audio_playback_stream == NULL) {
-			audio_playback_stream = pa_stream_new(context, "HDswitch", &mixer_sample_spec, NULL);
-			
-			pa_buffer_attr buffer_attr = { 0 };
-			buffer_attr.maxlength = (uint32_t) -1;
-			buffer_attr.prebuf = (uint32_t) -1;
-			buffer_attr.fragsize = (uint32_t) -1;
-			buffer_attr.tlength = pa_usec_to_bytes(latency_ms * PA_USEC_PER_MSEC, &mixer_sample_spec);
-			buffer_attr.minreq = (uint32_t) -1;
-			
-			pa_stream_connect_playback(audio_playback_stream, NULL, &buffer_attr, PA_STREAM_ADJUST_LATENCY, NULL, NULL);
-			
-			char buffer[512] = { 0 };
-			pa_sample_spec_snprint(buffer, sizeof(buffer), pa_stream_get_sample_spec(audio_playback_stream));
-			printf("audio_playback_stream sample_spec: %s\n", buffer);
-		}
-	}
-	*/
+static void on_new_mic_data(pa_stream *s, size_t length, void *userdata) {
+	mic_p mic = userdata;
 	
-	
-	bool init_stream_if_latency_known_or_drop_data() {
-		pa_usec_t latency = 0;
-		int negative = 0;
-		int result = pa_stream_get_latency(s, &latency, &negative);
-		
-		if (result != -PA_ERR_NODATA) {
-			printf("  stream latency: %.2lf ms\n", latency / 1000.0);
-			
-			stream_data->bytes_in_mixer_buffer = 0;
-			stream_data->pts = time_now() - latency - global_start_walltime;
-			
-			printf("  pts: %.2lf ms\n", stream_data->pts / 1000.0);
-			
-			if (mixer_pts == 0)
-				mixer_pts = stream_data->pts;
-			
-			// If the stream latency is above the mixer block threshold don't make
-			// the mixer wait (block) for this stream but instead mix it as we get it.
-			// This way the user might be able to detect the faulty mic with to much latency.
-			if (latency / 1000 > max_latency_for_mixer_block_ms) {
-				stream_data->pts = mixer_pts;
-				printf("  IGNORING MIC LATENCY because it's to high! We don't want everything to wait for it.\n");
-			}
-			
-			return true;
-		} else {
-			printf("  no stream latency data yet!\n");
-			
-			while (pa_stream_readable_size(s) > 0) {
-				if (pa_stream_peek(s, &in_buffer_ptr, &in_buffer_size) < 0) {
-					fprintf(stderr, "  Read failed\n");
-					return false;
-				}
-				pa_stream_drop(s);
-			}
-			
-			return false;
-		}
-	}
-	
-	
-	// Initialize the byte offset only as soon as we got the first data packet.
-	// Otherwise always waits for this stream from it's start to the arival of the first packet.
-	if (stream_data->bytes_in_mixer_buffer == -1) {
-		stream_data->bytes_in_mixer_buffer = -2;
-		
-		if (audio_playback_stream == NULL) {
-			audio_playback_stream = pa_stream_new(context, "HDswitch", &mixer_sample_spec, NULL);
-			
-			pa_buffer_attr buffer_attr = { 0 };
-			buffer_attr.maxlength = (uint32_t) -1;
-			buffer_attr.prebuf = (uint32_t) -1;
-			buffer_attr.fragsize = (uint32_t) -1;
-			buffer_attr.tlength = pa_usec_to_bytes(latency_ms * PA_USEC_PER_MSEC, &mixer_sample_spec);
-			buffer_attr.minreq = (uint32_t) -1;
-			
-			pa_stream_connect_playback(audio_playback_stream, NULL, &buffer_attr, PA_STREAM_ADJUST_LATENCY, NULL, NULL);
-			
-			char buffer[512] = { 0 };
-			pa_sample_spec_snprint(buffer, sizeof(buffer), pa_stream_get_sample_spec(audio_playback_stream));
-			printf("audio_playback_stream sample_spec: %s\n", buffer);
-		}
-		
-		printf("[%p] start after %.2lf ms, initial data: %zu bytes, %.2lf ms\n",
-			s, (time_now() - global_start_walltime) / 1000.0, length,
-			pa_bytes_to_usec(length, &mixer_sample_spec) / 1000.0);
+	void print_packet_details(const char* description) {
+		printf("[mic %15.15s] %s after %.2lf ms, data: %zu bytes, %.2lf ms, latency: ",
+			mic->name, description, (time_now() - global_start_walltime) / 1000.0,
+			length, pa_bytes_to_usec(length, &mixer_sample_spec) / 1000.0);
 		
 		pa_usec_t latency = 0;
 		int negative = 0;
 		int result = pa_stream_get_latency(s, &latency, &negative);
 		if (result == -PA_ERR_NODATA) {
-			printf("  no stream latency data yet!\n");
+			printf("unknown\n");
 		} else {
-			printf("  stream latency: %.2lf ms\n", latency / 1000.0);
+			printf("%.2lf ms\n", latency / 1000.0);
 		}
-		
-		char buffer[512] = { 0 };
-		pa_sample_spec_snprint(buffer, sizeof(buffer), pa_stream_get_sample_spec(s));
-		printf("  sample_spec: %s\n", buffer);
+	}
+	
+	
+	if (mic->state == MIC_STATE_WAITING_FOR_FIRST_PACKET) {
+		// Flush the stream as soon as the first packet comes around. Sometimes it can take
+		// several seconds (!) to initialize the mic and once the data flows it can be quite
+		// old. E.g. a mic takes 6 seconds until we get the first packet and Pulse Audio
+		// has 4 seconds of audio data in it's buffers. In that case we would start of with
+		// a 4 second latency! To avoid that the flush the stream on the first packet. In the
+		// example this kills the 4 seconds of buffered data and we would get up to date data
+		// on the next packet.
+		print_packet_details("initial packet");
 		
 		pa_operation* op = pa_stream_flush(s, NULL, NULL);
 		pa_operation_unref(op);
 		
+		mic->state = MIC_STATE_WAITING_FOR_KNOWN_LATENCY;
 		return;
-	} else if (stream_data->bytes_in_mixer_buffer == -2) {
-		stream_data->bytes_in_mixer_buffer = -3;
+	} else if (mic->state == MIC_STATE_WAITING_FOR_KNOWN_LATENCY) {
+		// No we get decent up to date audio data. But to really get the proper timing we still
+		// need to know the latency of the data. That is how many milliseconds ago the current
+		// audio packet was recorded.
+		// For the first few packets this can be unknown since Pulse Audio doesn't have any
+		// timing data yet. We throw these away because we can't accuratly place them on the
+		// mixer "timeline".
+		// As soon as we get a packet with known latency we know where to place the data on the
+		// timeline and can initialize the stream properly.
+		// If the stream latency is way to high (e.g. really bad or broken mic) just ignore
+		// the latency and mix the data right in when it comes around. If it's important the user
+		// can identify the mic and fix it. But we don't block all other mics because of one
+		// broken mic.
+		print_packet_details("after flush packet");
 		
-		printf("[%p] first packet after flush, after %.2lf ms, data: %zu bytes, %.2lf ms\n",
-			s, (time_now() - global_start_walltime) / 1000.0, length,
-			pa_bytes_to_usec(length, &mixer_sample_spec) / 1000.0);
+		pa_usec_t latency = 0;
+		int negative = 0;
+		int result = pa_stream_get_latency(s, &latency, &negative);
 		
-		if ( ! init_stream_if_latency_known_or_drop_data() ) {
-			return;
-		}
-	} else if (stream_data->bytes_in_mixer_buffer == -3) {
-		printf("[%p] packet with unknown latency, after %.2lf ms, data: %zu bytes, %.2lf ms\n",
-			s, (time_now() - global_start_walltime) / 1000.0, length,
-			pa_bytes_to_usec(length, &mixer_sample_spec) / 1000.0);
-		
-		if ( ! init_stream_if_latency_known_or_drop_data() ) {
+		if (result != -PA_ERR_NODATA) {
+			mic->pts = time_now() - latency - global_start_walltime;
+			printf("  stream latency: %.2lf ms, pts: %.2lf ms\n", latency / 1000.0, mic->pts / 1000.0);
+			
+			// Initialize the mixer PTS if no one is using the mixer yet
+			if (mixer_pts == 0)
+				mixer_pts = mic->pts;
+			
+			// If the stream latency is above the mixer block threshold don't make
+			// the mixer wait (block) for this stream but instead mix it as we get it.
+			// This way the user might be able to detect the faulty mic with to much latency.
+			if (latency / 1000 > max_latency_for_mixer_block_ms) {
+				mic->pts = mixer_pts;
+				printf("  IGNORING MIC LATENCY because it's to high! We don't want everything to wait for it.\n");
+			}
+			
+			// Stream timing is properly setup now, so continue on and mix the streams audio
+			// data into the mixer buffer.
+			// The timing data is for the current audio packet so also mix this one in. Therefore
+			// no return statement here, we want to continue with the code further down!
+			mic->state = MIC_STATE_MIXING;
+		} else {
+			// Don't know the latency of the data so no idea where it belongs on the
+			// timeline. So throw it away and wait for the next packet.
+			const void *in_buffer_ptr;
+			size_t in_buffer_size;
+			
+			while (pa_stream_readable_size(s) > 0) {
+				if (pa_stream_peek(s, &in_buffer_ptr, &in_buffer_size) < 0) {
+					fprintf(stderr, "  Read failed\n");
+					return;
+				}
+				pa_stream_drop(s);
+			}
+			
 			return;
 		}
 	}
 	
-	//log_countdown = (log_countdown + 1) % 100;
-	log_countdown = 0;
-	if (!log_countdown) printf("[%p, %.2lf ms] %6zu bytes, %.2lf ms\n",
-		s, stream_data->pts / 1000.0, length, pa_bytes_to_usec(length, &mixer_sample_spec) / 1000.0);
 	
+	bool log_packets = true;
+	if (log_packets) printf("[mic %15.15s pts: %.2lf ms] %6zu bytes, %.2lf ms\n",
+			mic->name, mic->pts / 1000.0,
+			length, pa_bytes_to_usec(length, &mixer_sample_spec) / 1000.0);
+	
+	// Read all the audio data from the packet and mix it into the mixer buffer
+	uint64_t mixer_buffer_end_pts = mixer_pts + pa_bytes_to_usec(mixer_buffer_size - mixer_pos, &mixer_sample_spec);
 	while (pa_stream_readable_size(s) > 0) {
-		// peek actually creates and fills the data vbl
+		// Read the audio data and make sure we have enough space for it in the mixer
+		const void *in_buffer_ptr;
+		size_t in_buffer_size;
+		
 		if (pa_stream_peek(s, &in_buffer_ptr, &in_buffer_size) < 0) {
-			fprintf(stderr, "  Read failed\n");
+			fprintf(stderr, "pa_stream_peek(): read failed\n");
 			return;
 		}
 		
-		if (in_buffer_ptr == NULL && in_buffer_size) {
-			printf("  buffer is empty! no idea what to do.\n");
+		if (in_buffer_ptr == NULL && in_buffer_size == 0) {
+			if (log_packets) printf("  buffer is empty! no idea what to do.\n");
 			continue;
 		}
+		
+		uint64_t packet_start_pts = mic->pts;
+		uint64_t packet_duration = pa_bytes_to_usec(in_buffer_size, &mixer_sample_spec);
+		uint64_t packet_end_pts = packet_start_pts + packet_duration;
 		
 		if (in_buffer_ptr == NULL && in_buffer_size > 0) {
-			printf("  hole of %zu bytes! don't add to mixer buffer.\n", in_buffer_size);
-			stream_data->bytes_in_mixer_buffer += in_buffer_size;
+			if (log_packets) printf("  hole of %zu bytes! skip ahead in mixer buffer.\n", in_buffer_size);
+			mic->pts += packet_duration;
 			continue;
 		}
 		
-		if (stream_data->bytes_in_mixer_buffer + in_buffer_size > mixer_buffer_size) {
-			printf("  mixer buffer overflow from %s, droping audio packet\n", stream_data->name);
+		if (packet_end_pts > mixer_buffer_end_pts) {
+			if (log_packets) printf("  mixer buffer overflow, droping audio packet\n");
+			mic->pts += packet_duration;
 			pa_stream_drop(s);
 			continue;
 		}
 		
-		//printf("  %zu bytes\n", in_buffer_size);
-		//pa_stream_write(audio_playback_stream, in_buffer_ptr, in_buffer_size, NULL, 0, PA_SEEK_RELATIVE);
-		
-		uint64_t start_pts = stream_data->pts;
-		uint64_t end_pts = stream_data->pts + pa_bytes_to_usec(in_buffer_size, &mixer_sample_spec);
-		
+		// Determine what part of the incomming audio data is new enough so we can write it
+		// into the mixer buffer.
 		const int16_t* in_samples_ptr = NULL;
-		size_t in_sample_count = 0, in_samples_size = 0;;
+		size_t in_sample_count = 0, in_samples_size = 0;
+		uint64_t in_samples_pts = 0;
 		
-		if (start_pts >= mixer_pts) {
+		if (packet_start_pts >= mixer_pts) {
 			// The audio packet is newer than the stuff emitted by the mixer. So we can write
 			// our entire audio into the mixer.
 			in_samples_ptr  = in_buffer_ptr;
 			in_samples_size = in_buffer_size;
 			in_sample_count = in_samples_size / sizeof(in_samples_ptr[0]);
-			printf("  writing %zu bytes into mixer\n", in_buffer_size);
-		} else if (start_pts < mixer_pts && end_pts > mixer_pts) {
+			in_samples_pts  = packet_start_pts;
+			if (log_packets) printf("  writing %zu bytes into mixer\n", in_samples_size);
+		} else if (packet_start_pts < mixer_pts && packet_end_pts > mixer_pts) {
 			// A part of the audio packet is to old but the rest is new stuff that should be
 			// written into the mixer.
-			size_t size_of_old_stuff = pa_usec_to_bytes(mixer_pts - start_pts, &mixer_sample_spec);
+			size_t size_of_old_stuff = pa_usec_to_bytes(mixer_pts - packet_start_pts, &mixer_sample_spec);
 			in_samples_ptr  = in_buffer_ptr + size_of_old_stuff;
 			in_samples_size = in_buffer_size - size_of_old_stuff;
 			in_sample_count = in_samples_size / sizeof(in_samples_ptr[0]);
-			printf("  skipping %zu bytes, writing %zu bytes into mixer (start %lu, end %lu, mixer %lu)\n",
-				size_of_old_stuff, in_buffer_size - size_of_old_stuff, start_pts, end_pts, mixer_pts);
+			in_samples_pts  = mixer_pts;
+			if (log_packets) printf("  skipping %zu bytes, writing %zu bytes into mixer (pts: start %lu, end %lu, mixer %lu)\n",
+				size_of_old_stuff, in_samples_size, packet_start_pts, packet_end_pts, mixer_pts);
 		} else {
-			// This entire audio packet is way to old. The mixer already emitted newer audio
+			// This entire audio packet is to old. The mixer already emitted newer audio
 			// data. So throw this packet away.
-			printf("  skipping %zu bytes (start %lu, end %lu, mixer %lu)\n",
-				in_buffer_size, start_pts, end_pts, mixer_pts);
+			if (log_packets) printf("  skipping %zu bytes (pts: start %lu, end %lu, mixer %lu)\n",
+				in_buffer_size, packet_start_pts, packet_end_pts, mixer_pts);
 		}
 		
 		if (in_samples_ptr) {
-			// Mix new sample into the mixer buffer
-			int16_t* mixer_samples_ptr = mixer_buffer_ptr + stream_data->bytes_in_mixer_buffer;
+			// Mix new samples into the mixer buffer
+			int16_t* mixer_samples_ptr = mixer_buffer_ptr + mixer_pos + pa_usec_to_bytes(in_samples_pts - mixer_pts, &mixer_sample_spec);
+			//int16_t* mixer_samples_ptr = mixer_buffer_ptr + stream_data->bytes_in_mixer_buffer;
 			
 			for(size_t i = 0; i < in_sample_count; i++) {
 				//mixer_samples_ptr[i] = in_samples_ptr[i];
@@ -366,34 +360,62 @@ static void mixer_on_new_mic_data(pa_stream *s, size_t length, void *userdata) {
 				else
 					mixer_samples_ptr[i] = a + b;
 			}
-			stream_data->bytes_in_mixer_buffer += in_samples_size;
 		}
 		
-		stream_data->pts += pa_bytes_to_usec(in_buffer_size, &mixer_sample_spec);
-		// swallow the data peeked at before
+		// Advance the mics PTS and drop the consumed audio data
+		mic->pts += packet_duration;
 		pa_stream_drop(s);
 	}
 	
 	// Check if a part of the mixer buffer has been written to by all streams. In that case
 	// this part contains data from all streams and can be written out.
-	if (!log_countdown) printf("  mixer %.2lf pts, bytes: ", mixer_pts / 1000.0);
-	ssize_t min_bytes_in_mixer = INT32_MAX, max_bytes_in_mixer = 0;
-	for(mic_p s = mics; s != NULL; s = s->next) {
-		if (!log_countdown) printf("%4zd ", s->bytes_in_mixer_buffer);
-		
-		// Ignore streams that have not yet received any data
-		if (s->bytes_in_mixer_buffer < 0)
+	if (log_packets) printf("  mixer pts %.2lf ms, stream pts: ", mixer_pts / 1000.0);
+	uint64_t min_stream_pts = UINT64_MAX, max_stream_pts = 0;
+	for(mic_p m = mics; m != NULL; m = m->next) {
+		// Ignore streams that do not yet mix data into the mixer buffer
+		if (m->state != MIC_STATE_MIXING)
 			continue;
 		
-		if (s->bytes_in_mixer_buffer < min_bytes_in_mixer)
-			min_bytes_in_mixer = s->bytes_in_mixer_buffer;
-		if (s->bytes_in_mixer_buffer > max_bytes_in_mixer)
-			max_bytes_in_mixer = s->bytes_in_mixer_buffer;
+		uint64_t pts = m->pts;
+		if (log_packets) printf("%.2lf ", pts / 1000.0);
+		
+		// If a new stream needs to catch up with the mixer its pts is smaller than the
+		// mixer pts. Set it to the mixer pts for the min/max calculation so it stalls
+		// the mixer until it cought up without causing a fatal overflow in the
+		// finished_duration variable fruther down.
+		if (pts < mixer_pts)
+			pts = mixer_pts;
+		
+		if (pts < min_stream_pts)
+			min_stream_pts = pts;
+		if (pts > max_stream_pts)
+			max_stream_pts = pts;
 	}
-	if (!log_countdown) printf("lag: %4zu bytes, %5.1f ms\n", max_bytes_in_mixer - min_bytes_in_mixer, pa_bytes_to_usec(max_bytes_in_mixer - min_bytes_in_mixer, &mixer_sample_spec) / 1000.0);
+	uint64_t finished_duration = min_stream_pts - mixer_pts;
+	uint64_t incomplete_duration = max_stream_pts - min_stream_pts;
+	if (log_packets) printf("finished: %.2lf ms, incomplete: %.2lf ms\n",
+		finished_duration / 1000.0, incomplete_duration / 1000.0);
 	
+	if (mixer_pts + finished_duration > mixer_buffer_end_pts) {
+		// There is no mixer buffer space left but the streams presentation timestamps (PTS)
+		// went ahead. So we have a finished buffer area that is larger than the rest of the
+		// buffer. In that case we can't do much but hope that someone consumes the pending
+		// mixer buffer data so we get more free space again.
+	} else if (finished_duration > 0) {
+		// We actually got a finished part of the mixer buffer. Play it back immediately
+		// and advance our mixer position. The mixer buffer area before the mixer position
+		// needs to be consumed by mixer_output_consume() before we can overwrite it.
+		size_t finished_size = pa_usec_to_bytes(finished_duration, &mixer_sample_spec);
+		
+		playback_audio(mixer_buffer_ptr + mixer_pos, finished_size);
+		
+		mixer_pos += finished_size;
+		mixer_pts += finished_duration;
+	}
+	/*
 	if (min_bytes_in_mixer > 0) {
-		pa_stream_write(audio_playback_stream, mixer_buffer_ptr, min_bytes_in_mixer, NULL, 0, PA_SEEK_RELATIVE);
+		playback_audio(mixer_buffer_ptr, min_bytes_in_mixer);
+		
 		server_enqueue_frame(2, mixer_pts, mixer_buffer_ptr, min_bytes_in_mixer);
 		
 		mixer_pts += pa_bytes_to_usec(min_bytes_in_mixer, &mixer_sample_spec);
@@ -413,4 +435,27 @@ static void mixer_on_new_mic_data(pa_stream *s, size_t length, void *userdata) {
 			s->bytes_in_mixer_buffer -= min_bytes_in_mixer;
 		}
 	}
+	*/
+}
+
+
+//
+// Utility functions
+//
+
+static void playback_audio(void* buffer_ptr, size_t buffer_size) {
+	if (audio_playback_stream == NULL) {
+		audio_playback_stream = pa_stream_new(context, "HDswitch", &mixer_sample_spec, NULL);
+		
+		pa_buffer_attr buffer_attr = { 0 };
+		buffer_attr.maxlength = (uint32_t) -1;
+		buffer_attr.prebuf = (uint32_t) -1;
+		buffer_attr.fragsize = (uint32_t) -1;
+		buffer_attr.tlength = pa_usec_to_bytes(latency_ms * PA_USEC_PER_MSEC, &mixer_sample_spec);
+		buffer_attr.minreq = (uint32_t) -1;
+		
+		pa_stream_connect_playback(audio_playback_stream, NULL, &buffer_attr, PA_STREAM_ADJUST_LATENCY, NULL, NULL);
+	}
+	
+	pa_stream_write(audio_playback_stream, buffer_ptr, buffer_size, NULL, 0, PA_SEEK_RELATIVE);
 }

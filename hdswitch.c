@@ -71,7 +71,7 @@ typedef struct {
 
 
 int main(int argc, char** argv) {
-	
+	/*
 	// One cam test setup
 	video_input_t video_inputs[] = {
 		{ "/dev/video0", 640, 480, NULL, 0 }
@@ -88,7 +88,7 @@ int main(int argc, char** argv) {
 			{ 0 }
 		}
 	};
-	/*
+	*/
 	// Two cam setup
 	video_input_t video_inputs[] = {
 		{ "/dev/video0", 640, 480, NULL, 0 },
@@ -110,7 +110,7 @@ int main(int argc, char** argv) {
 			{ 0 }
 		}
 	};
-	*/
+	
 	
 	// Calculate rest of the configuration
 	size_t video_input_count = sizeof(video_inputs) / sizeof(video_inputs[0]);
@@ -297,6 +297,16 @@ int main(int argc, char** argv) {
 	
 	// Do the loop
 	while ( pa_mainloop_iterate(poll_mainloop, true, NULL) >= 0 ) {
+		// Check for any audio data from the mixer we need to give to the server
+		void* buffer_ptr = NULL;
+		size_t buffer_size = 0;
+		uint64_t buffer_pts = 0;
+		mixer_output_peek(&buffer_ptr, &buffer_size, &buffer_pts);
+		if (buffer_size > 0) {
+			server_enqueue_frame(2, buffer_pts, buffer_ptr, buffer_size);
+			mixer_output_consume();
+		}
+		
 		// Render new video frames if one or more frames have been uploaded
 		if (something_to_render) {
 			video_view_p scene = scenes[scene_idx];
