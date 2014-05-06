@@ -31,6 +31,7 @@ typedef struct {
 } buffer_t, *buffer_p;
 
 pa_mainloop_api *server_mainloop = NULL;
+const char* server_socket_path = NULL;
 int server_fd = -1;
 list_p clients = NULL;
 list_p buffers = NULL;
@@ -52,6 +53,7 @@ bool server_start(const char* socket_path, uint16_t width, uint16_t height, uint
 	if (server_fd == -1)
 		return perror("[server] socket"), false;
 	
+	server_socket_path = socket_path;
 	unlink(socket_path);
 	
 	struct sockaddr_un addr = { AF_UNIX, "" };
@@ -85,6 +87,8 @@ void server_stop() {
 	
 	list_destroy(buffers);
 	free(header.ptr);
+	
+	unlink(server_socket_path);
 }
 
 void server_enqueue_frame(uint8_t track, uint64_t timecode_us, void* frame_data, size_t frame_size) {
