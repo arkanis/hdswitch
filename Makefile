@@ -10,7 +10,7 @@ CFLAGS := $(CFLAGS) -g
 #
 # Real applications, object files are created by implicit rules
 #
-hdswitch: LDLIBS = deps/libSDL2.a -ldl -lrt -lm `pkg-config --libs gl libpulse`
+hdswitch: LDLIBS = deps/libSDL2.a -pthread -ldl -lrt -lm `pkg-config --libs gl libpulse`
 hdswitch: deps/libSDL2.a hdswitch.o server.o mixer.o drawable.o stb_image.o cam.o ebml_writer.o array.o list.o
 
 hdswitch.o: deps/libSDL2.a
@@ -50,7 +50,8 @@ deps/libSDL2.tar.gz:
 
 deps/libSDL2.a: deps/libSDL2.tar.gz
 	cd deps;       tar -xaf libSDL2.tar.gz
-	mv deps/SDL* deps/SDL2
+	cd deps;       rm -rf SDL2
+	mv deps/SDL2-* deps/SDL2
 	cd deps/SDL2;  ./configure --disable-shared
 	cd deps/SDL2;  make -j
 	mv deps/SDL2/build/.libs/libSDL2.a deps/
@@ -58,6 +59,8 @@ deps/libSDL2.a: deps/libSDL2.tar.gz
 	mv deps/SDL2/include deps/include/SDL
 	rm -rf deps/SDL2
 
+deps/ubuntu:
+	sudo apt-get install build-essential libgl1-mesa-dev libpulse-dev
 
 # Clean all files listed in .gitignore, except sublime project files. Ensures the
 # ignore list is properly maintained.
