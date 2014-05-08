@@ -47,7 +47,7 @@ int main(int argc, char** argv) {
 	cam_p cam = cam_open(argv[1]);
 	cam_print_info(cam);
 	cam_print_frame_rate(cam);
-	cam_setup(cam, __builtin_bswap32('YUYV'), vw, vh, fps, 1, NULL);
+	cam_setup(cam, cam_pixel_format('YUYV'), vw, vh, fps, 1, NULL);
 	cam_print_frame_rate(cam);
 	
 	if ( ! cam_stream_start(cam, 3) )

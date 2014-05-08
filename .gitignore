@@ -4,8 +4,13 @@
 
 hdswitch
 experiments/v4l2_cam
+experiments/v4l2_list
 experiments/alsa
 experiments/alsa_rec
 experiments/fbo
 experiments/alsa_pcm_list
 experiments/pulse
+
+audio.raw
+core
+hdswitch.sock

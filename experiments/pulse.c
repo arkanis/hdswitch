@@ -1,9 +1,17 @@
+/*
+
+command to listen to raw audio log:
+pacat --rate 48000 audio.raw
+
+*/
+
 // for strdup
 #define _BSD_SOURCE
 #define _POSIX_SOURCE
 #include <signal.h>
 #include <sys/signalfd.h>
 #include <unistd.h>
+#include <sys/time.h>
 
 #include <stdio.h>
 #include <stdbool.h>
@@ -23,12 +31,18 @@ static void stream_read_cb(pa_stream *s, size_t length, void *userdata);
 static int signals_init();
 static int signals_cleanup(int signal_fd);
 
+static void stream_state_cb(pa_stream *s, void *userdata);
+static void stream_started_cb(pa_stream *s, void *userdata);
+static void stream_suspended_cb(pa_stream *s, void *userdata);
+static void stream_underflow_cb(pa_stream *s, void *userdata);
+
 
 typedef struct stream_s stream_t, *stream_p;
 struct stream_s {
 	ssize_t bytes_in_mixer_buffer;
 	pa_stream* stream;
 	char* name;
+	struct timeval start;
 	stream_p next;
 };
 stream_p streams = NULL;
@@ -45,13 +59,17 @@ void*    mixer_buffer_ptr = NULL;
 size_t   mixer_buffer_size = 0;
 uint64_t mixer_pts = 0;
 
+struct timeval global_start;
+FILE* audio_log = NULL;
+
 
 int main() {
+	audio_log = fopen("audio.raw", "wb");
 	int signal_fd = signals_init();
 	
 	mixer_buffer_size = pa_usec_to_bytes(mixer_buffer_time_ms * PA_USEC_PER_MSEC, &mixer_sample_spec);
 	mixer_buffer_ptr = malloc(mixer_buffer_size);
-	memset(mixer_buffer_ptr, 0, mixer_buffer_size);
+	memset(mixer_buffer_ptr, 0xff, mixer_buffer_size);
 	
 	pa_mainloop* pa_ml = pa_mainloop_new();
 	pa_mainloop_api* pa_api = pa_mainloop_get_api(pa_ml);
@@ -69,6 +87,7 @@ int main() {
 	free(mixer_buffer_ptr);
 	pa_context_disconnect(context);
 	signals_cleanup(signal_fd);
+	fclose(audio_log);
 	
 	return 0;
 }
@@ -84,6 +103,7 @@ static void context_state_cb(pa_context *c, void *userdata) {
 		case PA_CONTEXT_AUTHORIZING:  printf("PA_CONTEXT_AUTHORIZING\n");  break;
 		case PA_CONTEXT_SETTING_NAME: printf("PA_CONTEXT_SETTING_NAME\n"); break;
 		case PA_CONTEXT_READY:        printf("PA_CONTEXT_READY\n");
+			gettimeofday(&global_start, NULL);
 			pa_context_get_source_info_list(c, source_info_list_cb, NULL);
 			break;
 		case PA_CONTEXT_FAILED:       printf("PA_CONTEXT_FAILED\n");     break;
@@ -157,7 +177,12 @@ static void source_info_list_cb(pa_context *c, const pa_source_info *i, int eol,
 	stream_data->stream = stream;
 	stream_data->name = strdup(i->description);
 	streams = stream_data;
+	
+	pa_stream_set_state_callback(stream, stream_state_cb, stream_data);
 	pa_stream_set_read_callback(stream, stream_read_cb, stream_data);
+	pa_stream_set_started_callback(stream, stream_started_cb, stream_data);
+	pa_stream_set_suspended_callback(stream, stream_suspended_cb, stream_data);
+	pa_stream_set_underflow_callback(stream, stream_underflow_cb, stream_data);
 	
 	pa_buffer_attr buffer_attr = { 0 };
 	buffer_attr.maxlength = (uint32_t) -1;
@@ -166,10 +191,49 @@ static void source_info_list_cb(pa_context *c, const pa_source_info *i, int eol,
 	buffer_attr.tlength = (uint32_t) -1;
 	buffer_attr.minreq = (uint32_t) -1;
 	
-	if ( pa_stream_connect_record(stream, i->name, &buffer_attr, PA_STREAM_ADJUST_LATENCY) < 0 ) {
+	if ( pa_stream_connect_record(stream, i->name, &buffer_attr, PA_STREAM_ADJUST_LATENCY | PA_STREAM_INTERPOLATE_TIMING | PA_STREAM_AUTO_TIMING_UPDATE) < 0 ) {
 		printf("pa_stream_connect_record() failed: %s", pa_strerror(pa_context_errno(c)));
 	}
 }
+
+static void stream_state_cb(pa_stream *s, void *userdata) {
+	//stream_p stream_data = userdata;
+	pa_stream_state_t state = pa_stream_get_state(s);
+	char* state_name = NULL;
+	switch(state){
+		case PA_STREAM_UNCONNECTED:
+			state_name = "PA_STREAM_UNCONNECTED";
+			break;
+		case PA_STREAM_CREATING:
+			state_name = "PA_STREAM_CREATING";
+			break;
+		case PA_STREAM_READY:
+			//stream_data->bytes_in_mixer_buffer = 0;
+			state_name = "PA_STREAM_READY";
+			break;
+		case PA_STREAM_FAILED:
+			state_name = "PA_STREAM_FAILED";
+			break;
+		case PA_STREAM_TERMINATED:
+			state_name = "PA_STREAM_TERMINATED";
+			break;
+	}
+	printf("stream state changed to %s\n", state_name);
+}
+
+static void stream_started_cb(pa_stream *s, void *userdata) {
+	printf("stream started!\n");
+}
+
+static void stream_suspended_cb(pa_stream *s, void *userdata) {
+	printf("stream suspended!\n");
+}
+
+static void stream_underflow_cb(pa_stream *s, void *userdata) {
+	printf("stream underflow!\n");
+}
+
+
 
 static void stream_read_cb(pa_stream *s, size_t length, void *userdata) {
 	const void *in_buffer_ptr;
@@ -178,8 +242,28 @@ static void stream_read_cb(pa_stream *s, size_t length, void *userdata) {
 	
 	// Initialize the byte offset only as soon as we got the first data packet.
 	// Otherwise always waits for this stream from it's start to the arival of the first packet.
-	if (stream_data->bytes_in_mixer_buffer == -1)
+	if (stream_data->bytes_in_mixer_buffer == -1) {
 		stream_data->bytes_in_mixer_buffer = 0;
+		
+		gettimeofday(&stream_data->start, NULL);
+		struct timeval start_delay;
+		timersub(&stream_data->start, &global_start, &start_delay);
+		printf("stream start after %.2lf ms\n", start_delay.tv_sec * 1000.0 + start_delay.tv_usec / 1000.0);
+		
+		pa_usec_t latency = 0;
+		int negative = 0;
+		int result = pa_stream_get_latency(s, &latency, &negative);
+		if (result == -PA_ERR_NODATA) {
+			printf("no stream latency data yet!\n");
+		} else {
+			printf("stream latency: %.2lf ms\n", latency / 1000.0);
+			//if (latency > 20*1000)
+			//	pa_stream_flush(s, NULL, NULL);
+		}
+		
+		pa_stream_flush(s, NULL, NULL);
+		return;
+	}
 	
 	printf("stream_read_cb, stream %p, %6zu bytes\n", s, length);
 	
@@ -211,14 +295,18 @@ static void stream_read_cb(pa_stream *s, size_t length, void *userdata) {
 		size_t in_sample_count = in_buffer_size / sizeof(in_samples_ptr[0]);
 		int16_t* mixer_samples_ptr = mixer_buffer_ptr + stream_data->bytes_in_mixer_buffer;
 		
+		//fwrite(mixer_samples_ptr, in_buffer_size, 1, audio_log);
 		for(size_t i = 0; i < in_sample_count; i++) {
+			//mixer_samples_ptr[i] = in_samples_ptr[i];
+			
 			int16_t a = mixer_samples_ptr[i], b = in_samples_ptr[i];
-			if (a < 0 && b < 0)
+			if (a < 0 && b < 0) {
 				mixer_samples_ptr[i] = (a + b) - (a * b) / INT16_MIN;
-			else if (a > 0 && b > 0)
+			} else if (a > 0 && b > 0) {
 				mixer_samples_ptr[i] = (a + b) - (a * b) / INT16_MAX;
-			else
+			} else {
 				mixer_samples_ptr[i] = a + b;
+			}
 		}
 		stream_data->bytes_in_mixer_buffer += in_buffer_size;
 		
@@ -242,16 +330,18 @@ static void stream_read_cb(pa_stream *s, size_t length, void *userdata) {
 		if (s->bytes_in_mixer_buffer > max_bytes_in_mixer)
 			max_bytes_in_mixer = s->bytes_in_mixer_buffer;
 	}
-	printf("lag: %4zu bytes, %.1f ms\n", max_bytes_in_mixer - min_bytes_in_mixer, pa_bytes_to_usec(max_bytes_in_mixer - min_bytes_in_mixer, &mixer_sample_spec) / 1000.0);
+	printf("lag: %4zu bytes, %5.1f ms\n", max_bytes_in_mixer - min_bytes_in_mixer, pa_bytes_to_usec(max_bytes_in_mixer - min_bytes_in_mixer, &mixer_sample_spec) / 1000.0);
 	
 	if (min_bytes_in_mixer > 0) {
 		pa_stream_write(out_stream, mixer_buffer_ptr, min_bytes_in_mixer, NULL, 0, PA_SEEK_RELATIVE);
+		fwrite(mixer_buffer_ptr, min_bytes_in_mixer, 1, audio_log);
 		
 		size_t incomplete_mixer_bytes = max_bytes_in_mixer - min_bytes_in_mixer;
 		if (incomplete_mixer_bytes > 0) {
 			memmove(mixer_buffer_ptr, mixer_buffer_ptr + min_bytes_in_mixer, incomplete_mixer_bytes);
-			memset(mixer_buffer_ptr + incomplete_mixer_bytes, 0, max_bytes_in_mixer - incomplete_mixer_bytes);
 		}
+		// Always clear the buffer space written out, even if no bytes are incomplete
+		memset(mixer_buffer_ptr + incomplete_mixer_bytes, 0, max_bytes_in_mixer - incomplete_mixer_bytes);
 		
 		for(stream_p s = streams; s != NULL; s = s->next) {
 			// Ignore streams that have not yet received any data
