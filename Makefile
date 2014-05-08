@@ -44,11 +44,9 @@ ebml_writer.o: CFLAGS := $(CFLAGS) -std=gnu99
 
 #
 # Download and build SDL2 as static library.
-# Use the 2.0.2 development build right now because SDL_SetRelativeMouseMode() is
-# broken in the 2.0.1 release.
 #
 deps/libSDL2.tar.gz:
-	wget http://www.libsdl.org/tmp/SDL-2.0.2-8197.tar.gz -O deps/libSDL2.tar.gz
+	wget http://libsdl.org/release/SDL2-2.0.3.tar.gz -O deps/libSDL2.tar.gz
 
 deps/libSDL2.a: deps/libSDL2.tar.gz
 	cd deps;       tar -xaf libSDL2.tar.gz
@@ -65,3 +63,7 @@ deps/libSDL2.a: deps/libSDL2.tar.gz
 # ignore list is properly maintained.
 clean:
 	rm -fr `grep -v sublime .gitignore | tr '\n' ' '`
+
+# Make the project as clean as after a git clone.
+veryclean: clean
+	rm -rf deps/*
