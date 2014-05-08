@@ -17,6 +17,7 @@ int main(int argc, char** argv) {
 	size_t ww = 800,           wh = 450;
 	size_t vw = atoi(argv[2]), vh = atoi(argv[3]);
 	size_t fps = atoi(argv[4]);
+	float  mx = 0, my = 0;
 	
 	// SDL and OpenGL stuff
 	SDL_Init(SDL_INIT_VIDEO);
@@ -83,6 +84,11 @@ int main(int argc, char** argv) {
 				};
 				buffer_update(video->vertex_buffer, sizeof(tri_strip), tri_strip, GL_STATIC_DRAW);
 			}
+			
+			if (event.type == SDL_MOUSEMOTION) {
+				mx = (float)event.motion.x / ww * vw;
+				my = (float)event.motion.y / wh * vh;
+			}
 		}
 		
 		cam_buffer_t frame = cam_frame_get(cam);
@@ -90,6 +96,8 @@ int main(int argc, char** argv) {
 		texture_update(video->texture, GL_RG, frame.ptr);
 		cam_frame_release(cam);
 		
+		drawable_begin_uniforms(video);
+		glUniform2f(glGetUniformLocation(video->program, "mouse_pos"), mx, my);
 		drawable_draw(video);
 		SDL_GL_SwapWindow(win);
 	}

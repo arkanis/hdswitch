@@ -14,6 +14,7 @@ See http://www.fourcc.org/yuv.php#YUYV
 
 uniform sampler2DRect tex;
 varying vec2 tex_coords;
+uniform vec2 mouse_pos;
 
 void main(){
 	// Just show the luma channel
@@ -33,4 +34,6 @@ void main(){
 		y + 1.772    * (cb - 0.5),
 		1
 	);
+	
+	gl_FragColor *= 0.5 + smoothstep(300, 100, distance(tex_coords, mouse_pos)) / 2;
 }
