@@ -261,13 +261,18 @@ void texture_destroy(GLuint texture){
 void texture_update(GLuint texture, GLenum format, const void* data){
 	glBindTexture(GL_TEXTURE_RECTANGLE, texture);
 	
-	GLint width = 0, height = 0, internal_format = 0;
+	GLint width = 0, height = 0;
 	glGetTexLevelParameteriv(GL_TEXTURE_RECTANGLE, 0, GL_TEXTURE_WIDTH, &width);
 	glGetTexLevelParameteriv(GL_TEXTURE_RECTANGLE, 0, GL_TEXTURE_HEIGHT, &height);
-	glGetTexLevelParameteriv(GL_TEXTURE_RECTANGLE, 0, GL_TEXTURE_INTERNAL_FORMAT, &internal_format);
 	
 	glTexSubImage2D(GL_TEXTURE_RECTANGLE, 0, 0, 0, width, height, format, GL_UNSIGNED_BYTE, data);
 	glBindTexture(GL_TEXTURE_RECTANGLE, 0);
+}
+
+void texture_update_part(GLuint texture, GLenum format, const void* data, GLint x, GLint y, GLsizei width, GLsizei height) {
+	glBindTexture(GL_TEXTURE_RECTANGLE, texture);
+	glTexSubImage2D(GL_TEXTURE_RECTANGLE, 0, x, y, width, height, format, GL_UNSIGNED_BYTE, data);
+	glBindTexture(GL_TEXTURE_RECTANGLE, 0);	
 }
 
 

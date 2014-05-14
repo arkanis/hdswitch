@@ -11,6 +11,9 @@ experiments/fbo
 experiments/alsa_pcm_list
 experiments/pulse
 
+tests/*.o
+tests/*_test
+
 audio.raw
 core
 hdswitch.sock

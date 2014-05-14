@@ -57,6 +57,7 @@ void        buffer_update(GLuint buffer, size_t size, const void* data, GLenum u
 GLuint      texture_new(size_t width, size_t height, GLenum format);
 void        texture_destroy(GLuint texture);
 void        texture_update(GLuint texture, GLenum format, const void* data);
+void        texture_update_part(GLuint texture, GLenum format, const void* data, GLint x, GLint y, GLsizei width, GLsizei height);
 
 fbo_p       fbo_new(GLuint target_texture);
 void        fbo_destroy(fbo_p fbo);
