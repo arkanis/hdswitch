@@ -35,7 +35,7 @@ experiments/pulse: LDLIBS  = -lpulse
 
 experiments/text_rendering: CFLAGS := $(CFLAGS) -Ideps/include `pkg-config --cflags gl freetype2`
 experiments/text_rendering: LDLIBS = deps/libSDL2.a -ldl -lrt -lm `pkg-config --libs gl freetype2`
-experiments/text_rendering: stb_image.o drawable.o text_renderer.o hash.o
+experiments/text_rendering: stb_image.o drawable.o text_renderer.o hash.o array.o utf8.o
 
 tests/utf8_test: utf8.o tests/testing.o
 

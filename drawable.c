@@ -269,9 +269,11 @@ void texture_update(GLuint texture, GLenum format, const void* data){
 	glBindTexture(GL_TEXTURE_RECTANGLE, 0);
 }
 
-void texture_update_part(GLuint texture, GLenum format, const void* data, GLint x, GLint y, GLsizei width, GLsizei height) {
+void texture_update_part(GLuint texture, GLenum format, const void* data, GLint x, GLint y, GLsizei width, GLsizei height, GLint pitch) {
 	glBindTexture(GL_TEXTURE_RECTANGLE, texture);
+	glPixelStorei(GL_PACK_ROW_LENGTH, pitch);
 	glTexSubImage2D(GL_TEXTURE_RECTANGLE, 0, x, y, width, height, format, GL_UNSIGNED_BYTE, data);
+	glPixelStorei(GL_PACK_ROW_LENGTH, 0);
 	glBindTexture(GL_TEXTURE_RECTANGLE, 0);	
 }
 

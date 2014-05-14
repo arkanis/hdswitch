@@ -46,7 +46,13 @@ int main(int argc, char** argv) {
 	
 	text_renderer_t tr;
 	text_renderer_new(&tr, 512, 512);
-	uint32_t droid_sans = text_renderer_font_new(&tr, "DroidSans.ttf", 16);
+	uint32_t droid_sans = text_renderer_font_new(&tr, "DroidSans.ttf", 14);
+	float buffer[512];
+	size_t bytes_used = text_renderer_render(&tr, droid_sans, "Hello Text Rendering!\nNext line.", 400, 400, buffer, sizeof(buffer));
+	
+	drawable_p text = drawable_new(GL_TRIANGLE_STRIP, "text.vs", "text.fs");
+	text->texture = tr.texture;
+	text->vertex_buffer = buffer_new(bytes_used, buffer);
 	
 	SDL_Event event;
 	int win_w = w, win_h = h;
@@ -70,11 +76,25 @@ int main(int argc, char** argv) {
 		glClearColor(0, 0, 0, 1);
 		glClear(GL_COLOR_BUFFER_BIT);
 		drawable_draw(image);
+		
+		glEnable(GL_BLEND);
+		glBlendFunc(GL_SRC_COLOR, GL_ONE_MINUS_SRC_COLOR);
+		drawable_begin_uniforms(text);
+			float screen_to_normal[9] = {
+				2.0 / win_w,  0,           -1,
+				0,           -2.0 / win_h,  1,
+				0,            0,            1
+			};
+			glUniformMatrix3fv( glGetUniformLocation(text->program, "screen_to_normal"), 1, true, screen_to_normal );
+		drawable_draw(text);
+		glDisable(GL_BLEND);
+		
 		SDL_GL_SwapWindow(win);
 	}
 	
 	text_renderer_font_destroy(&tr, droid_sans);
 	text_renderer_destroy(&tr);
+	drawable_destroy(text);
 	drawable_destroy(image);
 	SDL_GL_DeleteContext(gl_ctx);
 	SDL_DestroyWindow(win);
