@@ -85,6 +85,7 @@ size_t text_renderer_render(text_renderer_p renderer, int32_t font_handle, char*
 	float* p = buffer_ptr;
 	size_t org_x = x;
 	int padding = 2;
+	FT_UInt glyph_index = 0, prev_glyph_index = 0;
 	
 	glBindTexture(GL_TEXTURE_RECTANGLE, renderer->texture);
 	
@@ -109,7 +110,7 @@ size_t text_renderer_render(text_renderer_p renderer, int32_t font_handle, char*
 			rect = array_elem(rline.rects, text_renderer_rect_t, rect_ref->rect_idx);
 		} else {
 			// Glyph not yet rendered, so do it
-			FT_UInt glyph_index = FT_Get_Char_Index(font->face, it.code_point);
+			glyph_index = FT_Get_Char_Index(font->face, it.code_point);
 			
 			FT_Error error = FT_Load_Glyph(font->face, glyph_index, FT_LOAD_RENDER /*| FT_LOAD_TARGET_LCD*/);
 			if (!error) {
@@ -198,22 +199,17 @@ size_t text_renderer_render(text_renderer_p renderer, int32_t font_handle, char*
 			*(p++) = tr_x; *(p++) = tr_y; *(p++) = tr_u; *(p++) = tr_v;
 			*(p++) = br_x; *(p++) = br_y; *(p++) = br_u; *(p++) = br_v;
 			*(p++) = bl_x; *(p++) = bl_y; *(p++) = bl_u; *(p++) = bl_v;
-			/*
-			*(p++) = bl_x; *(p++) = bl_y; *(p++) = bl_u; *(p++) = bl_v;
-			*(p++) = tl_x; *(p++) = tl_y; *(p++) = tl_u; *(p++) = tl_v;
-			*(p++) = br_x; *(p++) = br_y; *(p++) = br_u; *(p++) = br_v;
-			*(p++) = tr_x; *(p++) = tr_y; *(p++) = tr_u; *(p++) = tr_v;
-			*/
+			
 			x += rect.hori_advance;
 		}
 		
-		/*
 		if (glyph_index && prev_glyph_index) {
 			FT_Vector delta;
-			FT_Get_Kerning(hud->face, prev_glyph_index, glyph_index, FT_KERNING_DEFAULT, &delta);
-			pen_x += delta.x >> 6;
+			FT_Get_Kerning(font->face, prev_glyph_index, glyph_index, FT_KERNING_DEFAULT, &delta);
+			x += delta.x / 64;
 		}
-		*/
+		
+		prev_glyph_index = glyph_index;
 	}
 	
 	glPixelStorei(GL_UNPACK_ALIGNMENT, unpack_alignment);
