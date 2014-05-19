@@ -95,7 +95,7 @@ size_t text_renderer_render(text_renderer_p renderer, int32_t font_handle, char*
 	
 	for(utf8_iterator_t it = utf8_first(text); it.code_point != 0; it = utf8_next(it)) {
 		if (it.code_point == '\n') {
-			y += font->face->height / 64;
+			y += font->face->size->metrics.height / 64;
 			x = org_x;
 			continue;
 		}
@@ -168,7 +168,11 @@ size_t text_renderer_render(text_renderer_p renderer, int32_t font_handle, char*
 				rect = new_rect;
 				
 				// Store glyph image in new rect
-				printf("%c: %ux%u %u bytes, pitch %u\n", it.code_point, gw, gh, gw*gh, font->face->glyph->bitmap.pitch);
+				printf("%c: %2ux%2u %2u bytes, pitch %u, x: %zu, y: %zu hb: %3ld/%3ld, adv: %3ld/%3ld\n",
+					it.code_point, gw, gh, gw*gh, font->face->glyph->bitmap.pitch,
+					x, y,
+					font->face->glyph->metrics.horiBearingX, font->face->glyph->metrics.horiBearingY,
+					font->face->glyph->metrics.horiAdvance, font->face->glyph->metrics.vertAdvance);
 				//void* test = malloc(gw*gh*3);
 				//memset(test, 64, gw*gh*3);
 					//texture_update_part(renderer->texture, GL_RGB, test, tex_x, tex_y, gw, gh, gw);
@@ -179,6 +183,12 @@ size_t text_renderer_render(text_renderer_p renderer, int32_t font_handle, char*
 					//texture_update_part(renderer->texture, GL_RGB, font->face->glyph->bitmap.buffer, tex_x, tex_y, gw, gh, font->face->glyph->bitmap.pitch);
 				//free(test);
 			}
+		}
+		
+		if (glyph_index && prev_glyph_index) {
+			FT_Vector delta;
+			FT_Get_Kerning(font->face, prev_glyph_index, glyph_index, FT_KERNING_DEFAULT, &delta);
+			x += delta.x / 64;
 		}
 		
 		// We have the texture coordinates of the glyph, generate the vertex buffer
@@ -201,12 +211,6 @@ size_t text_renderer_render(text_renderer_p renderer, int32_t font_handle, char*
 			*(p++) = bl_x; *(p++) = bl_y; *(p++) = bl_u; *(p++) = bl_v;
 			
 			x += rect.hori_advance;
-		}
-		
-		if (glyph_index && prev_glyph_index) {
-			FT_Vector delta;
-			FT_Get_Kerning(font->face, prev_glyph_index, glyph_index, FT_KERNING_DEFAULT, &delta);
-			x += delta.x / 64;
 		}
 		
 		prev_glyph_index = glyph_index;
