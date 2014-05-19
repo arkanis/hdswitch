@@ -46,9 +46,9 @@ int main(int argc, char** argv) {
 	
 	text_renderer_t tr;
 	text_renderer_new(&tr, 512, 512);
-	uint32_t droid_sans = text_renderer_font_new(&tr, "DroidSans.ttf", 40);
+	uint32_t droid_sans = text_renderer_font_new(&tr, "DroidSans.ttf", 14);
 	float buffer[512];
-	size_t bytes_used = text_renderer_render(&tr, droid_sans, "eHello Text Rendering!\nNext line.", 400, 400, buffer, sizeof(buffer));
+	size_t bytes_used = text_renderer_render(&tr, droid_sans, "Hello Text Rendering!\nNext line.", 400, 400, buffer, sizeof(buffer));
 	
 	drawable_p text = drawable_new(GL_TRIANGLES, "text.vs", "text.fs");
 	text->texture = tr.texture;
@@ -78,7 +78,10 @@ int main(int argc, char** argv) {
 		drawable_draw(image);
 		
 		glEnable(GL_BLEND);
-		glBlendFunc(GL_SRC_COLOR, GL_ONE_MINUS_SRC_COLOR);
+		
+		glBlendEquation(GL_FUNC_ADD);
+		glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ZERO);
+		
 		drawable_begin_uniforms(text);
 			float screen_to_normal[9] = {
 				2.0 / win_w,  0,           -1,

@@ -10,12 +10,12 @@ void text_renderer_new(text_renderer_p renderer, size_t texture_width, size_t te
 		return;
 	}
 	
-	renderer->texture = texture_new(texture_width, texture_height, GL_RGB8);
+	renderer->texture = texture_new(texture_width, texture_height, GL_R8);
 	
-	size_t black_data_size = texture_width * texture_height * 3;
+	size_t black_data_size = texture_width * texture_height;
 	void* black_data = malloc(black_data_size);
 	memset(black_data, 0, black_data_size);
-	texture_update(renderer->texture, GL_RGB, black_data);
+	texture_update(renderer->texture, GL_RED, black_data);
 	free(black_data);
 	
 	glBindTexture(GL_TEXTURE_RECTANGLE, renderer->texture);
@@ -88,6 +88,10 @@ size_t text_renderer_render(text_renderer_p renderer, int32_t font_handle, char*
 	
 	glBindTexture(GL_TEXTURE_RECTANGLE, renderer->texture);
 	
+	GLint unpack_alignment = 0;
+	glGetIntegerv(GL_UNPACK_ALIGNMENT, &unpack_alignment);
+	glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+	
 	for(utf8_iterator_t it = utf8_first(text); it.code_point != 0; it = utf8_next(it)) {
 		if (it.code_point == '\n') {
 			y += font->face->height / 64;
@@ -107,15 +111,15 @@ size_t text_renderer_render(text_renderer_p renderer, int32_t font_handle, char*
 			// Glyph not yet rendered, so do it
 			FT_UInt glyph_index = FT_Get_Char_Index(font->face, it.code_point);
 			
-			FT_Error error = FT_Load_Glyph(font->face, glyph_index, FT_LOAD_RENDER | FT_LOAD_TARGET_LCD);
+			FT_Error error = FT_Load_Glyph(font->face, glyph_index, FT_LOAD_RENDER /*| FT_LOAD_TARGET_LCD*/);
 			if (!error) {
 				float tex_x = 0, tex_y = 0;
 				//uint32_t gw = (font->face->glyph->metrics.width  + 63) / 64;
 				//uint32_t gh = (font->face->glyph->metrics.height + 63) / 64;
 				// need to divide by 3 because of subpixel rendering
-				uint32_t gw = font->face->glyph->bitmap.width / 3;
-				uint32_t gh = font->face->glyph->bitmap.rows;
-				//uint32_t gw = font->face->glyph->bitmap.width, gh = font->face->glyph->bitmap.rows;
+				//uint32_t gw = font->face->glyph->bitmap.width / 3;
+				//uint32_t gh = font->face->glyph->bitmap.rows;
+				uint32_t gw = font->face->glyph->bitmap.width, gh = font->face->glyph->bitmap.rows;
 				
 				// Search for a free slot to put the glyph image
 				text_renderer_line_p line = NULL;
@@ -163,12 +167,12 @@ size_t text_renderer_render(text_renderer_p renderer, int32_t font_handle, char*
 				rect = new_rect;
 				
 				// Store glyph image in new rect
-				printf("%c: %ux%u %u bytes, pitch %u\n", it.code_point, gw, gh, gw*gh*3, font->face->glyph->bitmap.pitch);
+				printf("%c: %ux%u %u bytes, pitch %u\n", it.code_point, gw, gh, gw*gh, font->face->glyph->bitmap.pitch);
 				//void* test = malloc(gw*gh*3);
 				//memset(test, 64, gw*gh*3);
 					//texture_update_part(renderer->texture, GL_RGB, test, tex_x, tex_y, gw, gh, gw);
-					glPixelStorei(GL_UNPACK_ROW_LENGTH, font->face->glyph->bitmap.pitch / 3);
-					glTexSubImage2D(GL_TEXTURE_RECTANGLE, 0, tex_x, tex_y, gw, gh, GL_RGB, GL_UNSIGNED_BYTE, font->face->glyph->bitmap.buffer);
+					glPixelStorei(GL_UNPACK_ROW_LENGTH, font->face->glyph->bitmap.pitch);
+					glTexSubImage2D(GL_TEXTURE_RECTANGLE, 0, tex_x, tex_y, gw, gh, GL_RED, GL_UNSIGNED_BYTE, font->face->glyph->bitmap.buffer);
 					
 					//texture_update_part(renderer->texture, GL_RGB, font->face->glyph->bitmap.buffer, tex_x, tex_y, gw, gh, font->face->glyph->bitmap.pitch / 3);
 					//texture_update_part(renderer->texture, GL_RGB, font->face->glyph->bitmap.buffer, tex_x, tex_y, gw, gh, font->face->glyph->bitmap.pitch);
@@ -212,6 +216,7 @@ size_t text_renderer_render(text_renderer_p renderer, int32_t font_handle, char*
 		*/
 	}
 	
+	glPixelStorei(GL_UNPACK_ALIGNMENT, unpack_alignment);
 	glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
 	glBindTexture(GL_TEXTURE_RECTANGLE, 0);
 	
