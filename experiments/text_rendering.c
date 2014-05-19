@@ -46,11 +46,11 @@ int main(int argc, char** argv) {
 	
 	text_renderer_t tr;
 	text_renderer_new(&tr, 512, 512);
-	uint32_t droid_sans = text_renderer_font_new(&tr, "DroidSans.ttf", 14);
+	uint32_t droid_sans = text_renderer_font_new(&tr, "DroidSans.ttf", 40);
 	float buffer[512];
-	size_t bytes_used = text_renderer_render(&tr, droid_sans, "Hello Text Rendering!\nNext line.", 400, 400, buffer, sizeof(buffer));
+	size_t bytes_used = text_renderer_render(&tr, droid_sans, "eHello Text Rendering!\nNext line.", 400, 400, buffer, sizeof(buffer));
 	
-	drawable_p text = drawable_new(GL_TRIANGLE_STRIP, "text.vs", "text.fs");
+	drawable_p text = drawable_new(GL_TRIANGLES, "text.vs", "text.fs");
 	text->texture = tr.texture;
 	text->vertex_buffer = buffer_new(bytes_used, buffer);
 	

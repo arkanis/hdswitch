@@ -84,7 +84,9 @@ size_t text_renderer_render(text_renderer_p renderer, int32_t font_handle, char*
 	
 	float* p = buffer_ptr;
 	size_t org_x = x;
-	int padding = 0;
+	int padding = 2;
+	
+	glBindTexture(GL_TEXTURE_RECTANGLE, renderer->texture);
 	
 	for(utf8_iterator_t it = utf8_first(text); it.code_point != 0; it = utf8_next(it)) {
 		if (it.code_point == '\n') {
@@ -109,10 +111,11 @@ size_t text_renderer_render(text_renderer_p renderer, int32_t font_handle, char*
 			if (!error) {
 				float tex_x = 0, tex_y = 0;
 				//uint32_t gw = (font->face->glyph->metrics.width  + 63) / 64;
+				//uint32_t gh = (font->face->glyph->metrics.height + 63) / 64;
 				// need to divide by 3 because of subpixel rendering
 				uint32_t gw = font->face->glyph->bitmap.width / 3;
-				uint32_t gh = (font->face->glyph->metrics.height + 63) / 64;
-				//uint32_t gh = font->face->glyph->bitmap.rows, gw = font->face->glyph->bitmap.width;
+				uint32_t gh = font->face->glyph->bitmap.rows;
+				//uint32_t gw = font->face->glyph->bitmap.width, gh = font->face->glyph->bitmap.rows;
 				
 				// Search for a free slot to put the glyph image
 				text_renderer_line_p line = NULL;
@@ -160,13 +163,21 @@ size_t text_renderer_render(text_renderer_p renderer, int32_t font_handle, char*
 				rect = new_rect;
 				
 				// Store glyph image in new rect
-				texture_update_part(renderer->texture, GL_RGB, font->face->glyph->bitmap.buffer, tex_x, tex_y, gw, gh, font->face->glyph->bitmap.pitch);
-				//texture_update_part(renderer->texture, GL_RGB, font->face->glyph->bitmap.buffer, tex_x, tex_y, gw, gh, font->face->glyph->bitmap.pitch);
+				printf("%c: %ux%u %u bytes, pitch %u\n", it.code_point, gw, gh, gw*gh*3, font->face->glyph->bitmap.pitch);
+				//void* test = malloc(gw*gh*3);
+				//memset(test, 64, gw*gh*3);
+					//texture_update_part(renderer->texture, GL_RGB, test, tex_x, tex_y, gw, gh, gw);
+					glPixelStorei(GL_UNPACK_ROW_LENGTH, font->face->glyph->bitmap.pitch / 3);
+					glTexSubImage2D(GL_TEXTURE_RECTANGLE, 0, tex_x, tex_y, gw, gh, GL_RGB, GL_UNSIGNED_BYTE, font->face->glyph->bitmap.buffer);
+					
+					//texture_update_part(renderer->texture, GL_RGB, font->face->glyph->bitmap.buffer, tex_x, tex_y, gw, gh, font->face->glyph->bitmap.pitch / 3);
+					//texture_update_part(renderer->texture, GL_RGB, font->face->glyph->bitmap.buffer, tex_x, tex_y, gw, gh, font->face->glyph->bitmap.pitch);
+				//free(test);
 			}
 		}
 		
 		// We have the texture coordinates of the glyph, generate the vertex buffer
-		if ( (p + 4*4 - buffer_ptr) * sizeof(float) < buffer_size ) {
+		if ( (p + 6*4 - buffer_ptr) * sizeof(float) < buffer_size ) {
 			float w = rect.glyph_width, h = rline.glyph_height;
 			
 			float cx = x + rect.hori_bearing_x;
@@ -177,11 +188,18 @@ size_t text_renderer_render(text_renderer_p renderer, int32_t font_handle, char*
 			float bl_x = cx + 0, bl_y = cy + h,  bl_u = rect.tex_coord_x,     bl_v = rect.tex_coord_y + h;
 			float br_x = cx + w, br_y = cy + h,  br_u = rect.tex_coord_x + w, br_v = rect.tex_coord_y + h;
 			
+			*(p++) = tl_x; *(p++) = tl_y; *(p++) = tl_u; *(p++) = tl_v;
+			*(p++) = tr_x; *(p++) = tr_y; *(p++) = tr_u; *(p++) = tr_v;
+			*(p++) = bl_x; *(p++) = bl_y; *(p++) = bl_u; *(p++) = bl_v;
+			*(p++) = tr_x; *(p++) = tr_y; *(p++) = tr_u; *(p++) = tr_v;
+			*(p++) = br_x; *(p++) = br_y; *(p++) = br_u; *(p++) = br_v;
+			*(p++) = bl_x; *(p++) = bl_y; *(p++) = bl_u; *(p++) = bl_v;
+			/*
 			*(p++) = bl_x; *(p++) = bl_y; *(p++) = bl_u; *(p++) = bl_v;
 			*(p++) = tl_x; *(p++) = tl_y; *(p++) = tl_u; *(p++) = tl_v;
 			*(p++) = br_x; *(p++) = br_y; *(p++) = br_u; *(p++) = br_v;
 			*(p++) = tr_x; *(p++) = tr_y; *(p++) = tr_u; *(p++) = tr_v;
-			
+			*/
 			x += rect.hori_advance;
 		}
 		
@@ -193,6 +211,9 @@ size_t text_renderer_render(text_renderer_p renderer, int32_t font_handle, char*
 		}
 		*/
 	}
+	
+	glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+	glBindTexture(GL_TEXTURE_RECTANGLE, 0);
 	
 	return (p - buffer_ptr) * sizeof(float);
 }

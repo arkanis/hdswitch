@@ -270,11 +270,17 @@ void texture_update(GLuint texture, GLenum format, const void* data){
 }
 
 void texture_update_part(GLuint texture, GLenum format, const void* data, GLint x, GLint y, GLsizei width, GLsizei height, GLint pitch) {
+	// We leave GL_UNPACK_ALIGNMENT at the default value of 4. This magically fixes up pitches that
+	// don't fall onto pixel borders.
+	GLint row_length = 0;
+	glGetIntegerv(GL_UNPACK_ROW_LENGTH, &row_length);
+	glPixelStorei(GL_UNPACK_ROW_LENGTH, pitch);
+	
 	glBindTexture(GL_TEXTURE_RECTANGLE, texture);
-	glPixelStorei(GL_PACK_ROW_LENGTH, pitch);
 	glTexSubImage2D(GL_TEXTURE_RECTANGLE, 0, x, y, width, height, format, GL_UNSIGNED_BYTE, data);
-	glPixelStorei(GL_PACK_ROW_LENGTH, 0);
-	glBindTexture(GL_TEXTURE_RECTANGLE, 0);	
+	glBindTexture(GL_TEXTURE_RECTANGLE, 0);
+	
+	glPixelStorei(GL_UNPACK_ROW_LENGTH, row_length);
 }
 
 
