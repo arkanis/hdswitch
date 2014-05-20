@@ -36,25 +36,32 @@ int main(int argc, char** argv) {
 		
 		// Triangle strip for a basic quad
 		float tri_strip[] = {
-			-1.0, -1.0,     0,     h / 4,
+			-1.0, -1.0,     0,     h / 1,
 			-1.0,  1.0,     0,     0,
-			 1.0, -1.0,     w / 4, h / 4,
-			 1.0,  1.0,     w / 4, 0
+			 1.0, -1.0,     w / 1, h / 1,
+			 1.0,  1.0,     w / 1, 0
 		};
 		image->vertex_buffer = buffer_new(sizeof(tri_strip), tri_strip);		
 	free(image_ptr);
 	
 	text_renderer_t tr;
-	text_renderer_new(&tr, 128, 128);
-	uint32_t droid_sans = text_renderer_font_new(&tr, "DroidSans.ttf", 14);
+	text_renderer_new(&tr, 512, 512);
 	float buffer[6*4*200];
-	size_t bytes_used = text_renderer_render(&tr, droid_sans, "Hello Text Rendering!\nNext line.", 200, 200, buffer, sizeof(buffer));
+	
+	uint32_t droid_sans = text_renderer_font_new(&tr, "DroidSans.ttf", 14);
+	uint32_t headline = text_renderer_font_new(&tr, "DroidSans.ttf", 40);
+	
+	text_renderer_prepare(&tr, droid_sans, 0, 255);
+	size_t bytes_used = 0;
+	bytes_used += text_renderer_render(&tr, droid_sans, "Hello Text Rendering!\nNext line.", 0, 0, buffer + (bytes_used / sizeof(float)), sizeof(buffer) - bytes_used);
+	bytes_used += text_renderer_render(&tr, headline, "Text Rendering!", 0, 150, buffer + (bytes_used / sizeof(float)), sizeof(buffer) - bytes_used);
+	
 	
 	drawable_p text = drawable_new(GL_TRIANGLES, "text.vs", "text.fs");
 	text->texture = tr.texture;
 	text->vertex_buffer = buffer_new(bytes_used, buffer);
 	
-	image->texture = text->texture;
+	//image->texture = text->texture;
 	
 	SDL_Event event;
 	int win_w = w, win_h = h;
