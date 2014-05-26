@@ -10,11 +10,13 @@ CFLAGS := $(CFLAGS) -g
 #
 # Real applications, object files are created by implicit rules
 #
-hdswitch: LDLIBS = deps/libSDL2.a -pthread -ldl -lrt -lm `pkg-config --libs gl libpulse`
-hdswitch: deps/libSDL2.a hdswitch.o server.o mixer.o drawable.o stb_image.o cam.o ebml_writer.o array.o list.o
+hdswitch: LDLIBS = deps/libSDL2.a -pthread -ldl -lrt -lm `pkg-config --libs gl libpulse freetype2`
+hdswitch: deps/libSDL2.a hdswitch.o server.o mixer.o drawable.o stb_image.o cam.o ebml_writer.o array.o hash.o utf8.o list.o text_renderer.o
 
 hdswitch.o: deps/libSDL2.a
-hdswitch.o: CFLAGS := $(CFLAGS) -Ideps/include `pkg-config --cflags gl libpulse` -Wno-multichar -Wno-unused-but-set-variable -Wno-unused-variable
+hdswitch.o: CFLAGS := $(CFLAGS) -Ideps/include `pkg-config --cflags gl libpulse freetype2` -Wno-multichar -Wno-unused-but-set-variable -Wno-unused-variable
+
+text_renderer.o: CFLAGS := $(CFLAGS) `pkg-config --cflags freetype2`
 
 experiments/v4l2_cam: CFLAGS := $(CFLAGS) -Wno-multichar -Wno-unused-variable -Ideps/include `pkg-config --cflags gl`
 experiments/v4l2_cam: LDLIBS = deps/libSDL2.a -ldl -lrt -lm `pkg-config --libs gl`

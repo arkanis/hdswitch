@@ -30,6 +30,8 @@ ffmpeg -y -i unix:hdswitch.sock -f webm - | ffmpeg2theora --output /dev/stdout -
 #include "list.h"
 #include "server.h"
 #include "mixer.h"
+#include "text_renderer.h"
+#include "timer.h"
 
 
 // Global stuff used by event callbacks
@@ -40,6 +42,14 @@ bool something_to_render = false;
 uint32_t start_ms = 0;
 
 usec_t global_start_walltime = 0;
+
+double video_upload_time = 0, sld_event_time = 0, dispatch_time = 0, mixer_output_time = 0;
+double compose_time = 0, colorspace_time = 0, video_download_time = 0, enqueue_video_frame_time = 0;
+double draw_video_time = 0, draw_text_time = 0;
+double total_time = 0;
+
+double total_time_max = 0, total_time_avg = 0, total_time_avg_sum = 0;
+uint32_t total_time_count = 0;
 
 
 static int signals_init();
@@ -260,6 +270,16 @@ int main(int argc, char** argv) {
 		stream->vertex_buffer = buffer_new(sizeof(tri_strip), tri_strip);
 	}
 	
+	// Init GUI and text rendering
+	text_renderer_t tr;
+	text_renderer_new(&tr, 512, 512);
+	uint32_t status_font = text_renderer_font_new(&tr, "DroidSans.ttf", 14);
+	text_renderer_prepare(&tr, status_font, 0, 127);
+	
+	drawable_p text = drawable_new(GL_TRIANGLES, "shaders/text.vs", "shaders/text.fs");
+	text->vertex_buffer = buffer_new(0, NULL);
+	text->texture = tr.texture;
+	float text_vertex_buffer[6*4*400];
 	
 	// Setup sound input and output
 	pa_sample_spec mixer_sample_spec = {
@@ -267,7 +287,7 @@ int main(int argc, char** argv) {
 		.rate     = 48000,
 		.channels = 2
 	};
-
+	
 	
 	// Init local server
 	server_start("hdswitch.sock", cw, ch, mixer_sample_spec.rate, mixer_sample_spec.channels, pa_sample_size(&mixer_sample_spec) * 8, mainloop);
@@ -296,7 +316,11 @@ int main(int argc, char** argv) {
 	
 	
 	// Do the loop
+	usec_t performance_timer = time_now();
+	usec_t total_timer = time_now();
 	while ( pa_mainloop_iterate(poll_mainloop, true, NULL) >= 0 ) {
+		dispatch_time = time_mark_ms(&performance_timer);
+		
 		// Check for any audio data from the mixer we need to give to the server
 		void* buffer_ptr = NULL;
 		size_t buffer_size = 0;
@@ -306,6 +330,7 @@ int main(int argc, char** argv) {
 			server_enqueue_frame(2, buffer_pts, buffer_ptr, buffer_size);
 			mixer_output_consume();
 		}
+		mixer_output_time = time_mark_ms(&performance_timer);
 		
 		// Render new video frames if one or more frames have been uploaded
 		if (something_to_render) {
@@ -324,24 +349,68 @@ int main(int argc, char** argv) {
 				}
 				
 			fbo_bind(stream_fbo);
+				compose_time = time_mark_ms(&performance_timer);
 				
 				drawable_draw(stream);
 				
 			fbo_bind(NULL);
+			colorspace_time = time_mark_ms(&performance_timer);
 			
 			fbo_read(stream_fbo, GL_RG, GL_UNSIGNED_BYTE, stream_video_ptr);
+			video_download_time = time_mark_ms(&performance_timer);
 			
 			uint64_t timecode = time_now() - global_start_walltime;
 			server_enqueue_frame(1, timecode, stream_video_ptr, stream_video_size);
+			enqueue_video_frame_time = time_mark_ms(&performance_timer);
 			
 			glViewport(0, 0, ww, wh);
 			
 			drawable_draw(gui);
+			draw_video_time = time_mark_ms(&performance_timer);
+			
+			char text_buffer[512];
+			snprintf(text_buffer, sizeof(text_buffer), "event dispatch: %.2lf ms, sdl: %.2lf ms, video upload: %.2lf\ncompose: %.2lf colorspace: %.2lf ms download: %.2lf ms enqueue: %.2lf ms\ndraw video: %.2lf ms text: %.2lf ms\ntotal: %.2lf ms, avg %.2lf ms, max %.2lf ms",
+				dispatch_time, sld_event_time, video_upload_time,
+				compose_time, colorspace_time, video_download_time, enqueue_video_frame_time,
+				draw_video_time, draw_text_time,
+				total_time, total_time_avg, total_time_max);
+			size_t buffer_used = text_renderer_render(&tr, status_font, text_buffer, 10, 10, text_vertex_buffer, sizeof(text_vertex_buffer));
+			buffer_update(text->vertex_buffer, buffer_used, text_vertex_buffer, GL_STREAM_DRAW);
+			
+			glEnable(GL_BLEND);
+				glBlendEquation(GL_FUNC_ADD);
+				glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ZERO);
+				
+				drawable_begin_uniforms(text);
+					float screen_to_normal[9] = {
+						2.0 / ww,  0,        -1,
+						0,        -2.0 / wh,  1,
+						0,         0,         1
+					};
+					glUniformMatrix3fv( glGetUniformLocation(text->program, "screen_to_normal"), 1, true, screen_to_normal );
+				drawable_draw(text);
+			glDisable(GL_BLEND);
+			draw_text_time = time_mark_ms(&performance_timer);
 			
 			SDL_GL_SwapWindow(win);
 			
 			something_to_render = false;
 		}
+		
+		total_time = time_mark_ms(&total_timer);
+		
+		if (total_time_count < 100) {
+			total_time_avg_sum += total_time;
+			total_time_count++;
+		} else {
+			total_time_max = 0;
+			total_time_avg = total_time_avg_sum / total_time_count;
+			total_time_avg_sum = 0;
+			total_time_count = 0;
+		}
+		
+		if (total_time > total_time_max)
+			total_time_max = total_time;
 	}
 
 		// Output stats
@@ -378,6 +447,9 @@ int main(int argc, char** argv) {
 			buffer_destroy(vv->vertices);
 		}
 	}
+	
+	text_renderer_destroy(&tr);
+	drawable_destroy(text);
 	
 	drawable_destroy(stream);
 	drawable_destroy(gui);
@@ -468,6 +540,8 @@ static void signals_cb(pa_mainloop_api *mainloop, pa_io_event *e, int fd, pa_io_
 
 // Called periodically to handle pending SDL events
 static void sdl_event_check_cb(pa_mainloop_api *mainloop, pa_time_event *e, const struct timeval *tv, void *userdata) {
+	usec_t start = time_now();
+	
 	SDL_Event event;
 	while ( SDL_PollEvent(&event) ) {
 		if (event.type == SDL_QUIT) {
@@ -496,15 +570,19 @@ static void sdl_event_check_cb(pa_mainloop_api *mainloop, pa_time_event *e, cons
 	// Restart the timer for the next time
 	struct timeval next_sdl_check_time = usec_to_timeval( time_now() + 25000 );
 	mainloop->time_restart(e, &next_sdl_check_time);
+	
+	sld_event_time = time_mark_ms(&start);
 }
 
 // Upload new video frames to the GPU
 static void camera_frame_cb(pa_mainloop_api *mainloop, pa_io_event *e, int fd, pa_io_event_flags_t events, void *userdata) {
 	video_input_p video_input = userdata;
 	
-	cam_buffer_t frame = cam_frame_get(video_input->cam);
-		texture_update(video_input->tex, GL_RG, frame.ptr);
-	cam_frame_release(video_input->cam);
+	usec_t start = time_now();
+		cam_buffer_t frame = cam_frame_get(video_input->cam);
+			texture_update(video_input->tex, GL_RG, frame.ptr);
+		cam_frame_release(video_input->cam);
+	video_upload_time = time_mark_ms(&start);
 	
 	something_to_render = true;
 }
