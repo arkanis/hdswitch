@@ -81,7 +81,7 @@ typedef struct {
 
 
 int main(int argc, char** argv) {
-	/*
+	
 	// One cam test setup
 	video_input_t video_inputs[] = {
 		{ "/dev/video0", 640, 480, NULL, 0 }
@@ -98,7 +98,7 @@ int main(int argc, char** argv) {
 			{ 0 }
 		}
 	};
-	*/
+	/*
 	// Two cam setup
 	video_input_t video_inputs[] = {
 		{ "/dev/video0", 640, 480, NULL, 0 },
@@ -120,7 +120,7 @@ int main(int argc, char** argv) {
 			{ 0 }
 		}
 	};
-	
+	*/
 	
 	// Calculate rest of the configuration
 	size_t video_input_count = sizeof(video_inputs) / sizeof(video_inputs[0]);

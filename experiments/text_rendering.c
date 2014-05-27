@@ -51,7 +51,7 @@ int main(int argc, char** argv) {
 	uint32_t droid_sans = text_renderer_font_new(&tr, "DroidSans.ttf", 14);
 	uint32_t headline = text_renderer_font_new(&tr, "DroidSans.ttf", 40);
 	
-	text_renderer_prepare(&tr, droid_sans, 0, 255);
+	text_renderer_prepare(&tr, droid_sans, 0, 127);
 	size_t bytes_used = 0;
 	bytes_used += text_renderer_render(&tr, droid_sans, "Hello Text Rendering!\nNext line.", 0, 0, buffer + (bytes_used / sizeof(float)), sizeof(buffer) - bytes_used);
 	bytes_used += text_renderer_render(&tr, headline, "Text Rendering!", 0, 150, buffer + (bytes_used / sizeof(float)), sizeof(buffer) - bytes_used);
@@ -59,9 +59,14 @@ int main(int argc, char** argv) {
 	
 	drawable_p text = drawable_new(GL_TRIANGLES, "text.vs", "text.fs");
 	text->texture = tr.texture;
-	text->vertex_buffer = buffer_new(bytes_used, buffer);
+	GLuint static_text_vertex_buffer = buffer_new(bytes_used, buffer);
 	
-	//image->texture = text->texture;
+	image->texture = text->texture;
+	
+	char dynamic_text[200] = "";
+	float dynamic_text_vertecies[6*4*sizeof(dynamic_text)];
+	size_t dynamic_text_vertex_buffer_size = 0;
+	GLuint dynamic_text_vertex_buffer = buffer_new(0, NULL);
 	
 	SDL_Event event;
 	int win_w = w, win_h = h;
@@ -82,6 +87,28 @@ int main(int argc, char** argv) {
 			glViewport(0, 0, win_w, win_h);
 		}
 		
+		void regen_dynamic_text() {
+			dynamic_text_vertex_buffer_size = text_renderer_render(&tr, droid_sans, dynamic_text, 200, 200, dynamic_text_vertecies, sizeof(dynamic_text_vertecies));
+			buffer_update(dynamic_text_vertex_buffer, dynamic_text_vertex_buffer_size, dynamic_text_vertecies, GL_STATIC_DRAW);
+		}
+		
+		if (event.type == SDL_TEXTINPUT) {
+			printf("SDL_TEXTINPUT: %s\n", event.text.text);
+			strncat(dynamic_text, event.text.text, sizeof(dynamic_text));
+			regen_dynamic_text();
+		}
+		if (event.type == SDL_KEYDOWN && event.key.keysym.sym == SDLK_BACKSPACE) {
+			size_t len = strlen(dynamic_text);
+			if (len > 0) {
+				dynamic_text[len-1] = '\0';
+				regen_dynamic_text();
+			}
+		}
+		if (event.type == SDL_KEYDOWN && event.key.keysym.sym == SDLK_RETURN) {
+			strncat(dynamic_text, "\n", sizeof(dynamic_text));
+			regen_dynamic_text();
+		}
+		
 		glClearColor(0, 0, 0, 1);
 		glClear(GL_COLOR_BUFFER_BIT);
 		drawable_draw(image);
@@ -98,6 +125,9 @@ int main(int argc, char** argv) {
 				0,            0,            1
 			};
 			glUniformMatrix3fv( glGetUniformLocation(text->program, "screen_to_normal"), 1, true, screen_to_normal );
+			text->vertex_buffer = static_text_vertex_buffer;
+		drawable_draw(text);
+			text->vertex_buffer = dynamic_text_vertex_buffer;
 		drawable_draw(text);
 		glDisable(GL_BLEND);
 		
@@ -106,6 +136,8 @@ int main(int argc, char** argv) {
 	
 	text_renderer_font_destroy(&tr, droid_sans);
 	text_renderer_destroy(&tr);
+	buffer_destroy(static_text_vertex_buffer);
+	buffer_destroy(dynamic_text_vertex_buffer);
 	drawable_destroy(text);
 	drawable_destroy(image);
 	SDL_GL_DeleteContext(gl_ctx);
