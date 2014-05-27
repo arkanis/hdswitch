@@ -10,6 +10,8 @@ experiments/alsa_rec
 experiments/fbo
 experiments/alsa_pcm_list
 experiments/pulse
+experiments/text_rendering
+experiments/gui
 
 tests/*.o
 tests/*_test
